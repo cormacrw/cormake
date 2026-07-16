@@ -36,8 +36,11 @@ type Model struct {
 
 	renderedBody string
 
-	width     int
-	topHeight int
+	empty        bool
+	emptyMessage string
+
+	width, height int
+	topHeight     int
 }
 
 func New(logs map[string][]string) Model {
@@ -49,6 +52,7 @@ func New(logs map[string][]string) Model {
 
 func (m *Model) SetSize(w, h int) {
 	m.width = w
+	m.height = h
 
 	m.topHeight = int(float64(h) * topHeightPct)
 	if m.topHeight < 4 {
@@ -69,12 +73,21 @@ func (m *Model) SetSize(w, h int) {
 // content, and scrolls the log back to the top of the new task's log.
 // wsName/repoName are resolved display names, since Task only stores IDs.
 func (m *Model) SetTask(t domain.Task, wsName, repoName string) {
+	m.empty = false
 	m.task = t
 	m.wsName = wsName
 	m.repoName = repoName
 	m.Viewport.SetContent(strings.Join(m.logs[t.ID], "\n"))
 	m.Viewport.SetYOffset(0)
 	m.refreshRenderedBody()
+}
+
+// SetEmpty replaces the normal task view with a centered message — used
+// when there's no task to show at all (e.g. an empty workspace/view),
+// rather than rendering a fake task with a placeholder title.
+func (m *Model) SetEmpty(msg string) {
+	m.empty = true
+	m.emptyMessage = msg
 }
 
 // ScrollLog forwards a paging key straight to the log viewport, independent
@@ -86,6 +99,10 @@ func (m *Model) ScrollLog(msg tea.Msg) tea.Cmd {
 }
 
 func (m Model) View() string {
+	if m.empty {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+			metaStyle.Render(m.emptyMessage))
+	}
 	return lipgloss.JoinVertical(lipgloss.Left, m.renderTop(), m.Viewport.View())
 }
 

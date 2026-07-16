@@ -6,10 +6,13 @@ package ui
 import (
 	"os"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/google/uuid"
 
 	"cormake/internal/domain"
 	"cormake/internal/ui/detail"
@@ -31,6 +34,9 @@ type Model struct {
 	workspaceModalOpen bool
 	workspaceCursor    int
 
+	newTaskModalOpen bool
+	newTaskInput     textinput.Model
+
 	workspaceNames map[string]string
 	repoNames      map[string]string
 
@@ -41,24 +47,26 @@ type Model struct {
 }
 
 func New() Model {
-	data := newSampleData()
-
-	wsNames := make(map[string]string, len(data.Workspaces))
-	repoNames := make(map[string]string)
-	for _, w := range data.Workspaces {
-		wsNames[w.ID] = w.Name
-		for _, r := range w.Repos {
-			repoNames[r.ID] = r.Name
-		}
+	now := time.Now()
+	defaultWS := domain.Workspace{
+		ID:        uuid.NewString(),
+		Name:      "default",
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 
+	ti := textinput.New()
+	ti.Placeholder = "task title"
+	ti.CharLimit = 200
+	ti.Width = 40
+
 	m := Model{
-		workspaces:     data.Workspaces,
-		tasks:          data.Tasks,
-		workspaceNames: wsNames,
-		repoNames:      repoNames,
+		workspaces:     []domain.Workspace{defaultWS},
+		workspaceNames: map[string]string{defaultWS.ID: defaultWS.Name},
+		repoNames:      map[string]string{},
 		tasklist:       tasklist.New(nil),
-		detail:         detail.New(data.Logs),
+		detail:         detail.New(map[string][]string{}),
+		newTaskInput:   ti,
 	}
 	m.refreshTaskList()
 	return m
@@ -87,6 +95,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if m.workspaceModalOpen {
 			return m.updateWorkspaceModal(msg)
+		}
+
+		if m.newTaskModalOpen {
+			return m.updateNewTaskModal(msg)
 		}
 
 		switch {
@@ -122,6 +134,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.workspaceModalOpen = true
 			return m, nil
 
+		case key.Matches(msg, keys.NewTask):
+			m.newTaskInput.SetValue("")
+			m.newTaskModalOpen = true
+			return m, m.newTaskInput.Focus()
+
 		case key.Matches(msg, keys.Plan):
 			m.advanceSelected(domain.StatusPlanning, domain.StatusTodo)
 			return m, nil
@@ -130,7 +147,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.advanceSelected(domain.StatusInProgress, domain.StatusTodo, domain.StatusPlanned)
 			return m, nil
 
-		case key.Matches(msg, keys.NewTask, keys.Cancel, keys.Help):
+		case key.Matches(msg, keys.Cancel, keys.Help):
 			// Reserved: needs real storage/orchestrator wiring that doesn't
 			// exist yet. Intentionally a no-op rather than pretending to work.
 			return m, nil
@@ -171,6 +188,52 @@ func (m Model) updateWorkspaceModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.workspaceModalOpen = false
 	}
 	return m, nil
+}
+
+// updateNewTaskModal handles input while the new-task title prompt is open:
+// enter creates the task (if the title isn't blank) and closes the modal,
+// esc closes it without creating anything, everything else is forwarded to
+// the text input.
+func (m Model) updateNewTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.newTaskModalOpen = false
+		m.newTaskInput.Blur()
+		return m, nil
+	case "enter":
+		title := strings.TrimSpace(m.newTaskInput.Value())
+		m.newTaskModalOpen = false
+		m.newTaskInput.Blur()
+		if title != "" {
+			m.createTask(title)
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.newTaskInput, cmd = m.newTaskInput.Update(msg)
+	return m, cmd
+}
+
+// createTask adds a new TODO task to the active workspace with just a
+// title — everything else (description, repo, ...) gets filled in later
+// via the [enter] edit-in-editor flow.
+func (m *Model) createTask(title string) {
+	if len(m.workspaces) == 0 {
+		return
+	}
+	t := domain.Task{
+		ID:          uuid.NewString(),
+		WorkspaceID: m.workspaces[m.activeWS].ID,
+		Title:       title,
+		Status:      domain.StatusTodo,
+		Source:      "manual",
+		CreatedAt:   time.Now(),
+	}
+	m.tasks = append(m.tasks, t)
+	m.showArchive = false // a fresh TODO task belongs in the Open view
+	m.refreshTaskList()
+	m.tasklist.SelectByID(t.ID)
+	m.syncDetail()
 }
 
 // digitIndex parses a single-digit '1'-'9' key into a zero-based index.
@@ -302,11 +365,11 @@ func (m *Model) refreshTaskList() {
 func (m *Model) syncDetail() {
 	t, ok := m.tasklist.Selected()
 	if !ok {
-		placeholder := "no tasks in this workspace"
+		msg := "No tasks yet.\n\nPress n to create one."
 		if m.showArchive {
-			placeholder = "no archived tasks in this workspace"
+			msg = "No archived tasks."
 		}
-		m.detail.SetTask(domain.Task{Title: placeholder}, m.currentWorkspaceName(), "")
+		m.detail.SetEmpty(msg)
 		return
 	}
 	m.detail.SetTask(t, m.workspaceNames[t.WorkspaceID], m.repoNames[t.RepoID])
@@ -355,6 +418,10 @@ func (m Model) View() string {
 
 	if m.workspaceModalOpen {
 		return m.renderWorkspaceModal()
+	}
+
+	if m.newTaskModalOpen {
+		return m.renderNewTaskModal()
 	}
 
 	top := m.renderTabBar()
@@ -406,6 +473,18 @@ func (m Model) renderWorkspaceModal() string {
 	}
 	lines = append(lines, "", tabInfoStyle.Render("[enter] select   [esc] cancel"))
 
+	box := focusedPaneBorderStyle.Padding(1, 3).Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// renderNewTaskModal draws the new-task title prompt, centered over the
+// full screen.
+func (m Model) renderNewTaskModal() string {
+	lines := []string{
+		"New task", "",
+		m.newTaskInput.View(), "",
+		tabInfoStyle.Render("[enter] create   [esc] cancel"),
+	}
 	box := focusedPaneBorderStyle.Padding(1, 3).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }

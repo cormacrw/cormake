@@ -1,6 +1,7 @@
 // Package tasklist renders the left-hand pane: a compact, single-line list
-// of tasks (status glyph + mode + truncated title). It wraps bubbles/list
-// with a custom delegate rather than the built-in two-line default style.
+// of tasks (truncated title + a right-aligned status glyph). It wraps
+// bubbles/list with a custom delegate rather than the built-in two-line
+// default style.
 package tasklist
 
 import (
@@ -49,6 +50,18 @@ func (m *Model) SetTasks(tasks []domain.Task) {
 
 func (m *Model) SetSize(w, h int) {
 	m.List.SetSize(w, h)
+}
+
+// SelectByID moves the selection to the task with the given ID, if it's
+// present in the current (filtered) item set. Used to land on a
+// just-created task rather than wherever SetTasks reset the cursor to.
+func (m *Model) SelectByID(id string) {
+	for i, item := range m.List.Items() {
+		if it, ok := item.(Item); ok && it.Task.ID == id {
+			m.List.Select(i)
+			return
+		}
+	}
 }
 
 // Selected returns the currently highlighted task, if any.
