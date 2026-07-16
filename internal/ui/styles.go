@@ -19,6 +19,9 @@ var (
 
 	footerStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("245"))
+
+	tabInfoStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240"))
 )
 
 // paneOverhead is how many terminal columns/rows lipgloss's border adds on

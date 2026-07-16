@@ -4,6 +4,8 @@
 package ui
 
 import (
+	"os"
+
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -13,13 +15,6 @@ import (
 	"cormake/internal/ui/tasklist"
 )
 
-type focusZone int
-
-const (
-	focusList focusZone = iota
-	focusDetail
-)
-
 const (
 	topBarHeight = 1
 	footerHeight = 1
@@ -27,9 +22,10 @@ const (
 )
 
 type Model struct {
-	workspaces []domain.Workspace
-	activeWS   int
-	tasks      []domain.Task
+	workspaces  []domain.Workspace
+	activeWS    int
+	tasks       []domain.Task
+	showArchive bool
 
 	workspaceNames map[string]string
 	repoNames      map[string]string
@@ -37,7 +33,6 @@ type Model struct {
 	tasklist tasklist.Model
 	detail   detail.Model
 
-	focus         focusZone
 	width, height int
 }
 
@@ -60,7 +55,6 @@ func New() Model {
 		repoNames:      repoNames,
 		tasklist:       tasklist.New(nil),
 		detail:         detail.New(data.Logs),
-		focus:          focusList,
 	}
 	m.refreshTaskList()
 	return m
@@ -78,14 +72,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.recalcLayout()
 		return m, nil
 
+	case editorFinishedMsg:
+		m.applyEditorResult(msg)
+		return m, nil
+
 	case tea.KeyMsg:
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
 
-		case key.Matches(msg, keys.Tab):
-			m.toggleFocus()
-			return m, nil
+		case key.Matches(msg, keys.PgUp, keys.PgDown):
+			cmd := m.detail.ScrollLog(msg)
+			return m, cmd
 
 		case key.Matches(msg, keys.Left):
 			m.switchWorkspace(-1)
@@ -99,7 +101,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setWorkspace(int(msg.String()[0] - '1'))
 			return m, nil
 
-		case key.Matches(msg, keys.NewTask, keys.Open, keys.Cancel, keys.Workspaces, keys.Help):
+		case key.Matches(msg, keys.Archive):
+			m.showArchive = !m.showArchive
+			m.refreshTaskList()
+			return m, nil
+
+		case key.Matches(msg, keys.Open):
+			if t, ok := m.tasklist.Selected(); ok {
+				return m, openInEditorCmd(t)
+			}
+			return m, nil
+
+		case key.Matches(msg, keys.NewTask, keys.Cancel, keys.Workspaces, keys.Help):
 			// Reserved: needs real storage/orchestrator wiring that doesn't
 			// exist yet. Intentionally a no-op rather than pretending to work.
 			return m, nil
@@ -107,13 +120,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
-	switch m.focus {
-	case focusList:
-		m.tasklist, cmd = m.tasklist.Update(msg)
-		m.syncDetail()
-	case focusDetail:
-		m.detail, cmd = m.detail.Update(msg)
-	}
+	m.tasklist, cmd = m.tasklist.Update(msg)
+	m.syncDetail()
 	return m, cmd
 }
 
@@ -121,12 +129,32 @@ func isDigitOneToThree(s string) bool {
 	return len(s) == 1 && s[0] >= '1' && s[0] <= '3'
 }
 
-func (m *Model) toggleFocus() {
-	if m.focus == focusList {
-		m.focus = focusDetail
-	} else {
-		m.focus = focusList
+// applyEditorResult reads back the temp file an external editor session
+// left behind (if the session succeeded) and commits the parsed
+// title/description into the edited task, then cleans up the temp file.
+func (m *Model) applyEditorResult(msg editorFinishedMsg) {
+	if msg.path == "" {
+		return
 	}
+	defer os.Remove(msg.path)
+
+	if msg.err != nil {
+		return
+	}
+	data, readErr := os.ReadFile(msg.path)
+	if readErr != nil {
+		return
+	}
+
+	title, description := parseEditorContent(string(data))
+	for i, t := range m.tasks {
+		if t.ID == msg.taskID {
+			m.tasks[i].Title = title
+			m.tasks[i].Description = description
+			break
+		}
+	}
+	m.refreshTaskList()
 }
 
 func (m *Model) switchWorkspace(delta int) {
@@ -142,6 +170,10 @@ func (m *Model) setWorkspace(idx int) {
 	m.refreshTaskList()
 }
 
+// refreshTaskList rebuilds the visible task list from the active workspace
+// and the active/archive view toggle: the default view is active work only
+// (todo/in progress), while the archive view holds tasks that reached a
+// terminal outcome (planned, complete, failed, or cancelled).
 func (m *Model) refreshTaskList() {
 	if len(m.workspaces) == 0 {
 		return
@@ -149,9 +181,13 @@ func (m *Model) refreshTaskList() {
 	activeID := m.workspaces[m.activeWS].ID
 	filtered := make([]domain.Task, 0, len(m.tasks))
 	for _, t := range m.tasks {
-		if t.WorkspaceID == activeID {
-			filtered = append(filtered, t)
+		if t.WorkspaceID != activeID {
+			continue
 		}
+		if t.IsArchived() != m.showArchive {
+			continue
+		}
+		filtered = append(filtered, t)
 	}
 	m.tasklist.SetTasks(filtered)
 	m.syncDetail()
@@ -160,7 +196,11 @@ func (m *Model) refreshTaskList() {
 func (m *Model) syncDetail() {
 	t, ok := m.tasklist.Selected()
 	if !ok {
-		m.detail.SetTask(domain.Task{Title: "no tasks in this workspace"}, m.currentWorkspaceName(), "")
+		placeholder := "no tasks in this workspace"
+		if m.showArchive {
+			placeholder = "no archived tasks in this workspace"
+		}
+		m.detail.SetTask(domain.Task{Title: placeholder}, m.currentWorkspaceName(), "")
 		return
 	}
 	m.detail.SetTask(t, m.workspaceNames[t.WorkspaceID], m.repoNames[t.RepoID])
@@ -225,18 +265,18 @@ func (m Model) renderTabBar() string {
 			rendered = append(rendered, inactiveTabStyle.Render(label))
 		}
 	}
-	bar := " workspaces:  " + lipgloss.JoinHorizontal(lipgloss.Top, rendered...)
+	view := "active"
+	if m.showArchive {
+		view = "archive"
+	}
+	bar := " workspaces:  " + lipgloss.JoinHorizontal(lipgloss.Top, rendered...) +
+		tabInfoStyle.Render("   ·   viewing: "+view)
 	return lipgloss.NewStyle().Width(m.width).Render(bar)
 }
 
 func (m Model) renderBody() string {
-	leftStyle := paneBorderStyle
+	leftStyle := focusedPaneBorderStyle
 	rightStyle := paneBorderStyle
-	if m.focus == focusList {
-		leftStyle = focusedPaneBorderStyle
-	} else {
-		rightStyle = focusedPaneBorderStyle
-	}
 
 	leftTotal, rightTotal, contentHeight := m.paneDims()
 

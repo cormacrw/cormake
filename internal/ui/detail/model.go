@@ -1,5 +1,7 @@
-// Package detail renders the right-hand pane: a metadata card for the
-// currently selected task, followed by a scrollable viewport of its log.
+// Package detail renders the right-hand side of the app: a top panel with
+// the selected task's title, metadata, and markdown description (rendered
+// via glamour), and a log viewport underneath. Editing happens in an
+// external editor (see internal/ui/editor.go), not in this pane.
 package detail
 
 import (
@@ -8,27 +10,34 @@ import (
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
 	"cormake/internal/domain"
 )
 
-var cardStyle = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(lipgloss.Color("240")).
-	Padding(0, 1)
+var (
+	titleStyle   = lipgloss.NewStyle().Bold(true)
+	metaStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	dividerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+)
 
-// cardHeight is the fixed number of terminal rows the metadata card
-// occupies: 3 content lines + top/bottom border, no vertical padding.
-const cardHeight = 5
+// topHeightPct is the share of the pane's height given to the
+// title/info/description panel; the rest goes to the log viewport below it.
+const topHeightPct = 0.45
 
 type Model struct {
-	Viewport viewport.Model
+	Viewport viewport.Model // the log, bottom panel
+
 	task     domain.Task
 	wsName   string
 	repoName string
 	logs     map[string][]string
-	width    int
+
+	renderedBody string
+
+	width     int
+	topHeight int
 }
 
 func New(logs map[string][]string) Model {
@@ -38,20 +47,26 @@ func New(logs map[string][]string) Model {
 	}
 }
 
-// SetSize sets the total content area available to this pane; the card
-// takes a fixed slice of the height and the viewport gets the rest.
 func (m *Model) SetSize(w, h int) {
 	m.width = w
-	vh := h - cardHeight
-	if vh < 0 {
-		vh = 0
+
+	m.topHeight = int(float64(h) * topHeightPct)
+	if m.topHeight < 4 {
+		m.topHeight = 4
 	}
+	logHeight := h - m.topHeight
+	if logHeight < 1 {
+		logHeight = 1
+	}
+
 	m.Viewport.Width = w
-	m.Viewport.Height = vh
+	m.Viewport.Height = logHeight
+
+	m.refreshRenderedBody()
 }
 
-// SetTask switches the displayed task, refreshing both the card and the
-// log content, and scrolls back to the top of the new task's log.
+// SetTask switches the displayed task, refreshing the info panel and log
+// content, and scrolls the log back to the top of the new task's log.
 // wsName/repoName are resolved display names, since Task only stores IDs.
 func (m *Model) SetTask(t domain.Task, wsName, repoName string) {
 	m.task = t
@@ -59,42 +74,73 @@ func (m *Model) SetTask(t domain.Task, wsName, repoName string) {
 	m.repoName = repoName
 	m.Viewport.SetContent(strings.Join(m.logs[t.ID], "\n"))
 	m.Viewport.SetYOffset(0)
+	m.refreshRenderedBody()
 }
 
-// cardHorizontalPadding must match cardStyle's Padding(0, 1): lipgloss's
-// Width() sizes the content+padding box together, so the text itself only
-// gets (width - 2*padding) columns before it wraps.
-const cardHorizontalPadding = 1
+// ScrollLog forwards a paging key straight to the log viewport, independent
+// of whatever's shown in the top panel.
+func (m *Model) ScrollLog(msg tea.Msg) tea.Cmd {
+	var cmd tea.Cmd
+	m.Viewport, cmd = m.Viewport.Update(msg)
+	return cmd
+}
 
-func (m Model) card() string {
-	shortID := m.task.ID
-	if len(shortID) > 4 {
-		shortID = shortID[:4]
+func (m Model) View() string {
+	return lipgloss.JoinVertical(lipgloss.Left, m.renderTop(), m.Viewport.View())
+}
+
+func (m Model) renderTop() string {
+	stage, glyph := m.task.DisplayStage()
+	title := titleStyle.Render(truncate(m.task.Title, m.width-8)) + " #" + shortID(m.task.ID)
+	meta := metaStyle.Render(fmt.Sprintf("workspace: %s   repo: %s   mode: %s   %s %s",
+		m.wsName, m.repoName, m.task.Mode, glyph, stage))
+	divider := dividerStyle.Render(strings.Repeat("─", max0(m.width)))
+
+	content := strings.Join([]string{title, meta, divider, m.renderedBody}, "\n")
+	return lipgloss.NewStyle().Width(m.width).Height(m.topHeight).MaxHeight(m.topHeight).MaxWidth(m.width).Render(content)
+}
+
+// refreshRenderedBody re-runs glamour, which is cheap enough for task
+// descriptions but not worth doing on every keystroke, so it's only called
+// when the task or the available width changes.
+func (m *Model) refreshRenderedBody() {
+	m.renderedBody = renderMarkdown(m.task.Description, m.width)
+}
+
+func renderMarkdown(md string, width int) string {
+	if strings.TrimSpace(md) == "" {
+		return metaStyle.Render("_no description_")
 	}
-
-	cardWidth := m.width - 2 // subtract left/right border; Width() sets content+padding width
-	if cardWidth < 0 {
-		cardWidth = 0
+	if width < 1 {
+		width = 1
 	}
-	textWidth := cardWidth - 2*cardHorizontalPadding
-	if textWidth < 0 {
-		textWidth = 0
+	// WithStandardStyle, not WithAutoStyle: auto-detection queries the
+	// terminal's background color over stdin, which races bubbletea's own
+	// input reader on the same file descriptor and intermittently freezes
+	// the whole program. A fixed style avoids that terminal round-trip.
+	r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(width))
+	if err != nil {
+		return md
 	}
-
-	idPart := "#" + shortID
-	titlePad := textWidth - lipgloss.Width(idPart)
-	if titlePad < 0 {
-		titlePad = 0
+	out, err := r.Render(md)
+	if err != nil {
+		return md
 	}
-	title := truncate(m.task.Title, titlePad)
-	titleLine := fmt.Sprintf("%-*s%s", titlePad, title, idPart)
+	return strings.TrimRight(out, "\n")
+}
 
-	metaLine := truncate(fmt.Sprintf("workspace: %s   repo: %s   mode: %s", m.wsName, m.repoName, m.task.Mode), textWidth)
-	statusLine := truncate(fmt.Sprintf("status: %s   cost: $%.2f", m.task.Status, m.task.Cost), textWidth)
+func shortID(id string) string {
+	if len(id) > 4 {
+		return id[:4]
+	}
+	return id
+}
 
-	return cardStyle.Width(cardWidth).Render(
-		strings.Join([]string{titleLine, metaLine, statusLine}, "\n"),
-	)
+func max0(n int) int {
+	if n < 0 {
+		return 0
+	}
+	return n
 }
 
 func truncate(s string, maxWidth int) string {
@@ -112,14 +158,4 @@ func truncate(s string, maxWidth int) string {
 		runes = runes[:len(runes)-1]
 	}
 	return string(runes) + "…"
-}
-
-func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
-	var cmd tea.Cmd
-	m.Viewport, cmd = m.Viewport.Update(msg)
-	return m, cmd
-}
-
-func (m Model) View() string {
-	return lipgloss.JoinVertical(lipgloss.Left, m.card(), m.Viewport.View())
 }
