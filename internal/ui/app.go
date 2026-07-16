@@ -4,6 +4,7 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"cormake/internal/domain"
+	"cormake/internal/store"
 	"cormake/internal/ui/detail"
 	"cormake/internal/ui/tasklist"
 )
@@ -26,6 +28,7 @@ const (
 )
 
 type Model struct {
+	store       *store.Store
 	workspaces  []domain.Workspace
 	activeWS    int
 	tasks       []domain.Task
@@ -46,13 +49,37 @@ type Model struct {
 	width, height int
 }
 
-func New() Model {
-	now := time.Now()
-	defaultWS := domain.Workspace{
-		ID:        uuid.NewString(),
-		Name:      "default",
-		CreatedAt: now,
-		UpdatedAt: now,
+func New(st *store.Store) (Model, error) {
+	workspaces, err := st.LoadWorkspaces()
+	if err != nil {
+		return Model{}, err
+	}
+	if len(workspaces) == 0 {
+		now := time.Now()
+		defaultWS := domain.Workspace{
+			ID:        uuid.NewString(),
+			Name:      "default",
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		workspaces = []domain.Workspace{defaultWS}
+		if err := st.SaveWorkspaces(workspaces); err != nil {
+			return Model{}, err
+		}
+	}
+
+	tasks, err := st.LoadTasks()
+	if err != nil {
+		return Model{}, err
+	}
+
+	wsNames := make(map[string]string, len(workspaces))
+	repoNames := make(map[string]string)
+	for _, w := range workspaces {
+		wsNames[w.ID] = w.Name
+		for _, r := range w.Repos {
+			repoNames[r.ID] = r.Name
+		}
 	}
 
 	ti := textinput.New()
@@ -61,15 +88,17 @@ func New() Model {
 	ti.Width = 40
 
 	m := Model{
-		workspaces:     []domain.Workspace{defaultWS},
-		workspaceNames: map[string]string{defaultWS.ID: defaultWS.Name},
-		repoNames:      map[string]string{},
+		store:          st,
+		workspaces:     workspaces,
+		tasks:          tasks,
+		workspaceNames: wsNames,
+		repoNames:      repoNames,
 		tasklist:       tasklist.New(nil),
 		detail:         detail.New(map[string][]string{}),
 		newTaskInput:   ti,
 	}
 	m.refreshTaskList()
-	return m
+	return m, nil
 }
 
 func (m Model) Init() tea.Cmd {
@@ -230,10 +259,23 @@ func (m *Model) createTask(title string) {
 		CreatedAt:   time.Now(),
 	}
 	m.tasks = append(m.tasks, t)
+	m.persistTask(t)
 	m.showArchive = false // a fresh TODO task belongs in the Open view
 	m.refreshTaskList()
 	m.tasklist.SelectByID(t.ID)
 	m.syncDetail()
+}
+
+// persistTask saves t to disk, best-effort: there's no toast/error-banner
+// UI yet (future polish), so a failed save is logged to stderr rather than
+// crashing the TUI — a deliberate, temporary simplification.
+func (m *Model) persistTask(t domain.Task) {
+	if m.store == nil {
+		return
+	}
+	if err := m.store.SaveTask(t); err != nil {
+		fmt.Fprintln(os.Stderr, "cormake: failed to save task", t.ID+":", err)
+	}
 }
 
 // digitIndex parses a single-digit '1'-'9' key into a zero-based index.
@@ -266,6 +308,7 @@ func (m *Model) applyEditorResult(msg editorFinishedMsg) {
 		if t.ID == msg.taskID {
 			m.tasks[i].Title = title
 			m.tasks[i].Description = description
+			m.persistTask(m.tasks[i])
 			break
 		}
 	}
@@ -286,6 +329,7 @@ func (m *Model) archiveSelected() {
 		if m.tasks[i].ID != t.ID {
 			continue
 		}
+		changed := true
 		switch {
 		case m.tasks[i].Status == domain.StatusArchived:
 			m.tasks[i].Status = m.tasks[i].PreviousStatus
@@ -293,6 +337,11 @@ func (m *Model) archiveSelected() {
 		case m.tasks[i].CanArchive():
 			m.tasks[i].PreviousStatus = m.tasks[i].Status
 			m.tasks[i].Status = domain.StatusArchived
+		default:
+			changed = false
+		}
+		if changed {
+			m.persistTask(m.tasks[i])
 		}
 		break
 	}
@@ -321,6 +370,7 @@ func (m *Model) advanceSelected(to domain.Status, allowedFrom ...domain.Status) 
 	for i := range m.tasks {
 		if m.tasks[i].ID == t.ID {
 			m.tasks[i].Status = to
+			m.persistTask(m.tasks[i])
 			break
 		}
 	}
