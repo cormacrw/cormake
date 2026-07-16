@@ -5,6 +5,7 @@ package ui
 
 import (
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -26,6 +27,9 @@ type Model struct {
 	activeWS    int
 	tasks       []domain.Task
 	showArchive bool
+
+	workspaceModalOpen bool
+	workspaceCursor    int
 
 	workspaceNames map[string]string
 	repoNames      map[string]string
@@ -81,6 +85,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
+		if m.workspaceModalOpen {
+			return m.updateWorkspaceModal(msg)
+		}
+
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
@@ -90,20 +98,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 
 		case key.Matches(msg, keys.Left):
-			m.switchWorkspace(-1)
+			m.showArchive = false
+			m.refreshTaskList()
 			return m, nil
 
 		case key.Matches(msg, keys.Right):
-			m.switchWorkspace(1)
-			return m, nil
-
-		case isDigitOneToThree(msg.String()):
-			m.setWorkspace(int(msg.String()[0] - '1'))
+			m.showArchive = true
+			m.refreshTaskList()
 			return m, nil
 
 		case key.Matches(msg, keys.Archive):
-			m.showArchive = !m.showArchive
-			m.refreshTaskList()
+			m.archiveSelected()
 			return m, nil
 
 		case key.Matches(msg, keys.Open):
@@ -112,7 +117,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		case key.Matches(msg, keys.NewTask, keys.Cancel, keys.Workspaces, keys.Help):
+		case key.Matches(msg, keys.Workspaces):
+			m.workspaceCursor = m.activeWS
+			m.workspaceModalOpen = true
+			return m, nil
+
+		case key.Matches(msg, keys.Plan):
+			m.advanceSelected(domain.StatusPlanning, domain.StatusTodo)
+			return m, nil
+
+		case key.Matches(msg, keys.Execute):
+			m.advanceSelected(domain.StatusInProgress, domain.StatusTodo, domain.StatusPlanned)
+			return m, nil
+
+		case key.Matches(msg, keys.NewTask, keys.Cancel, keys.Help):
 			// Reserved: needs real storage/orchestrator wiring that doesn't
 			// exist yet. Intentionally a no-op rather than pretending to work.
 			return m, nil
@@ -125,8 +143,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func isDigitOneToThree(s string) bool {
-	return len(s) == 1 && s[0] >= '1' && s[0] <= '3'
+// updateWorkspaceModal handles input while the workspace picker is open:
+// up/down move the cursor, enter or a digit key confirms a selection, esc
+// or q cancels without changing the active workspace.
+func (m Model) updateWorkspaceModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "up", "k":
+		if m.workspaceCursor > 0 {
+			m.workspaceCursor--
+		}
+		return m, nil
+	case "down", "j":
+		if m.workspaceCursor < len(m.workspaces)-1 {
+			m.workspaceCursor++
+		}
+		return m, nil
+	case "enter":
+		m.setWorkspace(m.workspaceCursor)
+		m.workspaceModalOpen = false
+		return m, nil
+	case "esc", "q":
+		m.workspaceModalOpen = false
+		return m, nil
+	}
+	if idx, ok := digitIndex(msg.String()); ok && idx < len(m.workspaces) {
+		m.setWorkspace(idx)
+		m.workspaceModalOpen = false
+	}
+	return m, nil
+}
+
+// digitIndex parses a single-digit '1'-'9' key into a zero-based index.
+func digitIndex(s string) (int, bool) {
+	if len(s) != 1 || s[0] < '1' || s[0] > '9' {
+		return 0, false
+	}
+	return int(s[0] - '1'), true
 }
 
 // applyEditorResult reads back the temp file an external editor session
@@ -157,23 +209,77 @@ func (m *Model) applyEditorResult(msg editorFinishedMsg) {
 	m.refreshTaskList()
 }
 
-func (m *Model) switchWorkspace(delta int) {
-	m.setWorkspace(m.activeWS + delta)
-}
-
-func (m *Model) setWorkspace(idx int) {
-	n := len(m.workspaces)
-	if n == 0 {
+// archiveSelected toggles the selected task in or out of the archive. Only
+// a TODO or READY_FOR_REVIEW task can be archived (see Task.CanArchive) —
+// anything else is either actively in an agent's hands or already a
+// terminal outcome, and archiving is a no-op there. Unarchiving restores
+// whichever of those two statuses the task was archived from.
+func (m *Model) archiveSelected() {
+	t, ok := m.tasklist.Selected()
+	if !ok {
 		return
 	}
-	m.activeWS = ((idx % n) + n) % n
+	for i := range m.tasks {
+		if m.tasks[i].ID != t.ID {
+			continue
+		}
+		switch {
+		case m.tasks[i].Status == domain.StatusArchived:
+			m.tasks[i].Status = m.tasks[i].PreviousStatus
+			m.tasks[i].PreviousStatus = ""
+		case m.tasks[i].CanArchive():
+			m.tasks[i].PreviousStatus = m.tasks[i].Status
+			m.tasks[i].Status = domain.StatusArchived
+		}
+		break
+	}
+	m.refreshTaskList()
+}
+
+// advanceSelected moves the selected task to a new status, but only if it's
+// currently in one of allowedFrom — e.g. Execute makes sense from TODO or
+// PLANNED, but not from anything else. This does not spawn any agent yet;
+// it just advances Status so the pipeline is visible and testable in the UI.
+func (m *Model) advanceSelected(to domain.Status, allowedFrom ...domain.Status) {
+	t, ok := m.tasklist.Selected()
+	if !ok {
+		return
+	}
+	ok = false
+	for _, s := range allowedFrom {
+		if t.Status == s {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return
+	}
+	for i := range m.tasks {
+		if m.tasks[i].ID == t.ID {
+			m.tasks[i].Status = to
+			break
+		}
+	}
+	m.refreshTaskList()
+}
+
+// setWorkspace sets the active workspace by index and refreshes the task
+// list; idx is expected to already be in range (callers check against
+// len(m.workspaces)).
+func (m *Model) setWorkspace(idx int) {
+	if idx < 0 || idx >= len(m.workspaces) {
+		return
+	}
+	m.activeWS = idx
 	m.refreshTaskList()
 }
 
 // refreshTaskList rebuilds the visible task list from the active workspace
-// and the active/archive view toggle: the default view is active work only
-// (todo/in progress), while the archive view holds tasks that reached a
-// terminal outcome (planned, complete, failed, or cancelled).
+// and the active/archive view toggle: the default view is everything still
+// actionable (todo, planning, in progress, awaiting input, ready for
+// review), while the archive view holds tasks that reached a terminal
+// outcome (complete, failed, or cancelled).
 func (m *Model) refreshTaskList() {
 	if len(m.workspaces) == 0 {
 		return
@@ -247,31 +353,61 @@ func (m Model) View() string {
 		return ""
 	}
 
+	if m.workspaceModalOpen {
+		return m.renderWorkspaceModal()
+	}
+
 	top := m.renderTabBar()
 	body := m.renderBody()
-	footer := footerStyle.Width(m.width).Render(footerHelp)
+	// MaxWidth, not just Width: Width alone pads short content but wraps
+	// (rather than truncates) content wider than it, which silently adds an
+	// extra line and pushes the tab bar off-screen — bit us once already.
+	footer := footerStyle.Width(m.width).MaxWidth(m.width).Render(footerHelp)
 
 	return lipgloss.JoinVertical(lipgloss.Left, top, body, footer)
 }
 
+// renderTabBar renders the Open/Archived tabs on the left and the current
+// workspace name on the right; switching workspaces happens through the
+// [w] picker modal, not these tabs.
 func (m Model) renderTabBar() string {
-	var rendered []string
+	open, archived := " Open ", " Archived "
+	if !m.showArchive {
+		open = activeTabStyle.Render("[Open]")
+		archived = inactiveTabStyle.Render(archived)
+	} else {
+		open = inactiveTabStyle.Render(open)
+		archived = activeTabStyle.Render("[Archived]")
+	}
+	tabs := " " + open + "  " + archived
+
+	wsInfo := tabInfoStyle.Render("workspace: " + m.currentWorkspaceName())
+
+	gap := m.width - lipgloss.Width(tabs) - lipgloss.Width(wsInfo)
+	if gap < 1 {
+		gap = 1
+	}
+	bar := tabs + strings.Repeat(" ", gap) + wsInfo
+	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Render(bar)
+}
+
+// renderWorkspaceModal draws the workspace picker, centered over the full
+// screen (replacing the dashboard rather than overlaying it, for now).
+func (m Model) renderWorkspaceModal() string {
+	lines := []string{"Select workspace:", ""}
 	for i, w := range m.workspaces {
-		label := " " + w.Name + " "
-		if i == m.activeWS {
-			label = "[" + w.Name + "]"
-			rendered = append(rendered, activeTabStyle.Render(label))
-		} else {
-			rendered = append(rendered, inactiveTabStyle.Render(label))
+		marker := "  "
+		name := w.Name
+		if i == m.workspaceCursor {
+			marker = "▸ "
+			name = activeTabStyle.Render(name)
 		}
+		lines = append(lines, marker+name)
 	}
-	view := "active"
-	if m.showArchive {
-		view = "archive"
-	}
-	bar := " workspaces:  " + lipgloss.JoinHorizontal(lipgloss.Top, rendered...) +
-		tabInfoStyle.Render("   ·   viewing: "+view)
-	return lipgloss.NewStyle().Width(m.width).Render(bar)
+	lines = append(lines, "", tabInfoStyle.Render("[enter] select   [esc] cancel"))
+
+	box := focusedPaneBorderStyle.Padding(1, 3).Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 func (m Model) renderBody() string {

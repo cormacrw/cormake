@@ -14,8 +14,9 @@ var (
 	plainRowStyle    = lipgloss.NewStyle()
 )
 
-// Delegate renders each task as a single compact line:
-// "<marker><mode>  <title>" on the left, "<glyph> <STAGE>" right-aligned.
+// Delegate renders each task as a single compact line: "<marker><title>" on
+// the left, its status glyph right-aligned (full stage name is left for the
+// detail pane; the list stays compact).
 type Delegate struct{}
 
 func (d Delegate) Height() int                               { return 1 }
@@ -33,19 +34,17 @@ func (d Delegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
 		marker = "▸ "
 	}
 
-	stage, glyph := ti.Task.DisplayStage()
-	right := fmt.Sprintf("%s %s", glyph, stage)
+	_, glyph := ti.Task.DisplayStage()
 
-	prefix := fmt.Sprintf("%s%-8s ", marker, ti.Task.Mode)
-	titleWidth := m.Width() - lipgloss.Width(prefix) - lipgloss.Width(right) - 1
+	titleWidth := m.Width() - lipgloss.Width(marker) - lipgloss.Width(glyph) - 1
 	title := truncate(ti.Task.Title, titleWidth)
 
-	gap := m.Width() - lipgloss.Width(prefix) - lipgloss.Width(title) - lipgloss.Width(right)
+	gap := m.Width() - lipgloss.Width(marker) - lipgloss.Width(title) - lipgloss.Width(glyph)
 	if gap < 1 {
 		gap = 1
 	}
 
-	line := prefix + title + repeatSpace(gap) + right
+	line := marker + title + repeatSpace(gap) + glyph
 	if index == m.Index() {
 		line = selectedRowStyle.Render(line)
 	} else {

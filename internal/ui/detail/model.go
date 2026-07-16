@@ -92,8 +92,8 @@ func (m Model) View() string {
 func (m Model) renderTop() string {
 	stage, glyph := m.task.DisplayStage()
 	title := titleStyle.Render(truncate(m.task.Title, m.width-8)) + " #" + shortID(m.task.ID)
-	meta := metaStyle.Render(fmt.Sprintf("workspace: %s   repo: %s   mode: %s   %s %s",
-		m.wsName, m.repoName, m.task.Mode, glyph, stage))
+	meta := metaStyle.Render(fmt.Sprintf("workspace: %s   repo: %s   %s %s",
+		m.wsName, m.repoName, glyph, stage))
 	divider := dividerStyle.Render(strings.Repeat("─", max0(m.width)))
 
 	content := strings.Join([]string{title, meta, divider, m.renderedBody}, "\n")
