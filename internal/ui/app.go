@@ -4,8 +4,11 @@
 package ui
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,6 +18,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/google/uuid"
 
+	"cormake/internal/agent"
+	"cormake/internal/agent/claude"
 	"cormake/internal/domain"
 	"cormake/internal/store"
 	"cormake/internal/ui/detail"
@@ -50,7 +55,24 @@ type Model struct {
 	tasklist tasklist.Model
 	detail   detail.Model
 
+	// runner is the agent backend — claude.Client today, but kept behind
+	// the agent.Runner interface so nothing here is claude-specific.
+	// eventsCh is the shared fan-in channel every running task's forwarding
+	// goroutine writes to; active tracks cancel funcs by task ID (not wired
+	// to a key yet — that's the next piece).
+	runner   agent.Runner
+	eventsCh chan tea.Msg
+	active   map[string]func()
+
 	width, height int
+}
+
+// agentEventMsg/taskFinishedMsg are what a running task's forwarding
+// goroutine (see forwardEvents) sends over eventsCh.
+type agentEventMsg struct{ Event agent.Event }
+type taskFinishedMsg struct {
+	TaskID string
+	Err    error
 }
 
 func New(st *store.Store) (Model, error) {
@@ -97,13 +119,23 @@ func New(st *store.Store) (Model, error) {
 		tasklist:     tasklist.New(nil),
 		detail:       detail.New(map[string][]string{}),
 		newTaskInput: ti,
+		runner:       claude.Client{},
+		eventsCh:     make(chan tea.Msg, 64),
+		active:       make(map[string]func()),
 	}
 	m.refreshTaskList()
 	return m, nil
 }
 
 func (m Model) Init() tea.Cmd {
-	return nil
+	return waitForEvent(m.eventsCh)
+}
+
+// waitForEvent is the standard bubbletea "drain a channel" command: it
+// blocks for exactly one message, and callers re-append this same command
+// to whatever they return so the loop keeps listening.
+func waitForEvent(ch <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg { return <-ch }
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -121,6 +153,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case fileEditFinishedMsg:
 		m.reloadWorkspaces()
 		return m, nil
+
+	case revdiffFinishedMsg:
+		cmd := m.handleRevdiffFinished(msg)
+		return m, cmd
+
+	case agentEventMsg:
+		m.handleAgentEvent(msg.Event)
+		return m, waitForEvent(m.eventsCh)
+
+	case taskFinishedMsg:
+		m.handleTaskFinished(msg)
+		return m, waitForEvent(m.eventsCh)
 
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
@@ -183,6 +227,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keys.Execute):
 			m.openConfirm("Start executing", domain.StatusInProgress, domain.StatusTodo, domain.StatusPlanned)
+			return m, nil
+
+		case key.Matches(msg, keys.Review):
+			if t, ok := m.tasklist.Selected(); ok {
+				if plan := m.readPlanFile(t); plan != "" {
+					return m, openRevdiffCmd(t.ID, plan)
+				}
+			}
 			return m, nil
 
 		case key.Matches(msg, keys.TabDescription):
@@ -322,6 +374,14 @@ func (m Model) updateConfirmModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "enter":
 		m.confirmModalOpen = false
+		if m.confirmTo == domain.StatusPlanning {
+			// Plan is wired to a real run (safe: read-only, no worktree, no
+			// hook server needed). Execute isn't yet — that needs the
+			// permission-hook server first, or a real run would just hang
+			// the first time it hits anything outside acceptEdits.
+			cmd := m.startPlanRun()
+			return m, cmd
+		}
 		m.advanceSelected(m.confirmTo, m.confirmFrom...)
 		return m, nil
 	default:
@@ -493,6 +553,265 @@ func (m *Model) advanceSelected(to domain.Status, allowedFrom ...domain.Status) 
 	m.refreshTaskList()
 }
 
+// startPlanRun spawns a real claude plan-mode run for the selected task.
+// Eligibility was already checked once in openConfirm before the
+// confirmation modal appeared; nothing else could change the task's status
+// in between (the modal blocks all other input), so this doesn't
+// re-validate against confirmFrom.
+func (m *Model) startPlanRun() tea.Cmd {
+	t, ok := m.tasklist.Selected()
+	if !ok {
+		return nil
+	}
+	return m.runPlanAgent(t, buildPrompt(t), "")
+}
+
+// runPlanAgent spawns a plan-mode claude run for t with the given prompt,
+// shared by the initial Plan action and the revise-after-review-feedback
+// flow (see revdiff.go). resumeSessionID, when non-empty, continues t's
+// existing session instead of starting a fresh one — used so claude has
+// full context of the plan it already proposed when revising it.
+func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.Cmd {
+	repoPath, ok := m.repoPath(t.RepoID)
+	if !ok || repoPath == "" {
+		m.detail.AppendLogLine(t.ID, "cormake: cannot start — task has no repo assigned")
+		return nil
+	}
+
+	spec := agent.RunSpec{
+		TaskID:          t.ID,
+		Prompt:          prompt,
+		RepoPath:        repoPath,
+		Mode:            agent.RunModePlan,
+		ResumeSessionID: resumeSessionID,
+	}
+	sessionID := resumeSessionID
+	if sessionID == "" {
+		sessionID = uuid.NewString()
+		spec.SessionID = sessionID
+	}
+
+	handle, err := m.runner.Start(context.Background(), spec)
+	if err != nil {
+		m.detail.AppendLogLine(t.ID, "cormake: failed to start: "+err.Error())
+		return nil
+	}
+
+	for i := range m.tasks {
+		if m.tasks[i].ID == t.ID {
+			m.tasks[i].Status = domain.StatusPlanning
+			m.tasks[i].SessionID = sessionID
+			m.persistTask(m.tasks[i])
+			break
+		}
+	}
+	m.refreshTaskList()
+
+	m.active[t.ID] = handle.Cancel
+	go forwardEvents(m.eventsCh, t.ID, handle)
+
+	return nil
+}
+
+// handleRevdiffFinished reacts to a revdiff annotation session ending: a
+// failure gets logged, a clean quit with no annotations is a silent no-op,
+// and actual annotations kick off a revise run — resuming the task's
+// existing session so claude has the original plan in context — with no
+// separate confirmation step, since this reads as one continuous action
+// (annotate, quit, feedback sent) rather than two.
+func (m *Model) handleRevdiffFinished(msg revdiffFinishedMsg) tea.Cmd {
+	if msg.err != nil {
+		m.detail.AppendLogLine(msg.taskID, "cormake: revdiff failed: "+msg.err.Error())
+		return nil
+	}
+	if msg.annotations == "" {
+		return nil
+	}
+
+	for _, t := range m.tasks {
+		if t.ID != msg.taskID {
+			continue
+		}
+		m.detail.AppendLogLine(t.ID, "cormake: sending review feedback to claude for revision")
+		return m.runPlanAgent(t, buildRevisePrompt(msg.annotations), t.SessionID)
+	}
+	return nil
+}
+
+// repoPath looks up a repo's filesystem path by ID across all workspaces —
+// a linear scan is fine since it's only used at run-start time, not a hot
+// path, and there's no dedicated repo-path map yet.
+func (m Model) repoPath(repoID string) (string, bool) {
+	for _, w := range m.workspaces {
+		for _, r := range w.Repos {
+			if r.ID == repoID {
+				return expandHome(r.Path), true
+			}
+		}
+	}
+	return "", false
+}
+
+// expandHome expands a leading "~" or "~/..." to the user's home
+// directory. The OS has no concept of "~" — that's purely a shell
+// convenience — so a repo path hand-typed with one (very natural to type,
+// since that's how you'd normally reference it in a terminal) would
+// otherwise be passed to exec.Cmd.Dir completely literally and fail with a
+// misleading fork/exec error rather than a clear "path doesn't exist" one.
+func expandHome(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if path == "~" {
+		return home
+	}
+	return filepath.Join(home, path[2:])
+}
+
+// buildPrompt turns a task's title/description into the prompt sent to
+// claude — intentionally minimal for now, no template beyond concatenation.
+func buildPrompt(t domain.Task) string {
+	task := t.Title
+	if strings.TrimSpace(t.Description) != "" {
+		task += "\n\n" + t.Description
+	}
+	// Explicit "write a plan" framing matters: plan mode judges case by
+	// case whether a request warrants a written plan.md versus just
+	// answering directly (confirmed directly — a bare "summarize X in one
+	// sentence" prompt got answered inline with no plan file at all). Since
+	// cormake's Plan tab depends on that file existing, ask for one plainly
+	// rather than leaving it to judgment call.
+	return "Investigate the following task and write up a plan for how to approach it:\n\n" + task
+}
+
+// forwardEvents drains a running task's event channel onto the shared
+// eventsCh as tea.Msgs, then reports completion. It's a free function, not
+// a Model method, deliberately: bubbletea's Update returns a fresh Model
+// value on every call, so a goroutine must never hold a pointer into one
+// particular snapshot — it may only touch data reached through a channel,
+// which is safe to share by value across goroutines.
+func forwardEvents(eventsCh chan<- tea.Msg, taskID string, h *agent.Handle) {
+	for ev := range h.Events {
+		eventsCh <- agentEventMsg{Event: ev}
+	}
+	err := h.Wait()
+	eventsCh <- taskFinishedMsg{TaskID: taskID, Err: err}
+}
+
+// handleAgentEvent appends a formatted line to the task's live log for
+// every event type, and additionally captures the final result text/cost
+// onto the task itself when the run reports one.
+func (m *Model) handleAgentEvent(ev agent.Event) {
+	switch ev.Type {
+	case agent.EventInit:
+		m.detail.AppendLogLine(ev.TaskID, fmt.Sprintf("[init] model=%s", ev.Text))
+	case agent.EventText:
+		prefix := "assistant"
+		if ev.IsSubagent {
+			prefix = "subagent"
+		}
+		m.detail.AppendLogLine(ev.TaskID, prefix+": "+ev.Text)
+	case agent.EventToolUse:
+		m.detail.AppendLogLine(ev.TaskID, fmt.Sprintf("tool_use: %s(%s)", ev.ToolName, ev.ToolInput))
+		if path, ok := extractPlanFilePath(ev.ToolName, ev.ToolInput); ok {
+			m.setPlanFilePath(ev.TaskID, path)
+		}
+	case agent.EventToolResult:
+		m.detail.AppendLogLine(ev.TaskID, "tool_result: "+ev.Text)
+	case agent.EventResult:
+		m.detail.AppendLogLine(ev.TaskID, "result: "+ev.ResultText)
+		for i := range m.tasks {
+			if m.tasks[i].ID == ev.TaskID {
+				m.tasks[i].ResultSummary = ev.ResultText
+				m.tasks[i].Cost = ev.CostUSD
+				break
+			}
+		}
+	case agent.EventStderrLine:
+		m.detail.AppendLogLine(ev.TaskID, "stderr: "+ev.Text)
+	case agent.EventProcessError:
+		m.detail.AppendLogLine(ev.TaskID, "error: "+ev.Err.Error())
+	}
+}
+
+// extractPlanFilePath checks whether a Write/Edit tool call targeted
+// claude's plan directory (~/.claude/plans/ — its own hardcoded, always
+// read-only-mode-permitted scratch space for plan-mode, confirmed
+// directly, not assumed). toolInputJSON is the tool's JSON-stringified
+// input; only its file_path field is used.
+func extractPlanFilePath(toolName, toolInputJSON string) (string, bool) {
+	if toolName != "Write" && toolName != "Edit" {
+		return "", false
+	}
+	var input struct {
+		FilePath string `json:"file_path"`
+	}
+	if err := json.Unmarshal([]byte(toolInputJSON), &input); err != nil || input.FilePath == "" {
+		return "", false
+	}
+	plansDir, err := claudePlansDir()
+	if err != nil || !strings.HasPrefix(input.FilePath, plansDir) {
+		return "", false
+	}
+	return input.FilePath, true
+}
+
+// claudePlansDir returns ~/.claude/plans/ (trailing separator, so it's
+// ready for a strings.HasPrefix path check).
+func claudePlansDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude", "plans") + string(filepath.Separator), nil
+}
+
+// setPlanFilePath records where a task's plan landed (see
+// extractPlanFilePath) and refreshes the detail pane immediately, so the
+// Plan tab can appear mid-run rather than only once the whole run finishes.
+func (m *Model) setPlanFilePath(taskID, path string) {
+	for i := range m.tasks {
+		if m.tasks[i].ID != taskID {
+			continue
+		}
+		if m.tasks[i].PlanFilePath == path {
+			return
+		}
+		m.tasks[i].PlanFilePath = path
+		m.persistTask(m.tasks[i])
+		break
+	}
+	m.syncDetail()
+}
+
+// handleTaskFinished reacts to the running process actually exiting: a
+// successful plan run moves Planning -> Planned; a non-zero exit moves it
+// to Failed. Note this doesn't yet distinguish "genuinely failed" from
+// "user cancelled" (both look like a non-nil Wait() error) since there's no
+// way to trigger Cancel from the UI yet — that's the next piece.
+func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
+	delete(m.active, msg.TaskID)
+	for i := range m.tasks {
+		if m.tasks[i].ID != msg.TaskID {
+			continue
+		}
+		if msg.Err != nil {
+			m.tasks[i].Status = domain.StatusFailed
+			m.tasks[i].ErrorMessage = msg.Err.Error()
+		} else if m.tasks[i].Status == domain.StatusPlanning {
+			m.tasks[i].Status = domain.StatusPlanned
+		}
+		m.persistTask(m.tasks[i])
+		break
+	}
+	m.refreshTaskList()
+	m.syncDetail()
+}
+
 // setWorkspace sets the active workspace by index and refreshes the task
 // list; idx is expected to already be in range (callers check against
 // len(m.workspaces)).
@@ -538,7 +857,22 @@ func (m *Model) syncDetail() {
 		m.detail.SetEmpty(msg)
 		return
 	}
-	m.detail.SetTask(t, m.repoNames[t.RepoID])
+	m.detail.SetTask(t, m.repoNames[t.RepoID], m.readPlanFile(t))
+}
+
+// readPlanFile reads a task's plan (see domain.Task.PlanFilePath) from
+// disk, if it has one. A missing/unreadable file is treated the same as
+// "no plan yet" rather than surfaced as an error — it's just not written
+// (or not written *yet*, mid-run) rather than something having gone wrong.
+func (m Model) readPlanFile(t domain.Task) string {
+	if t.PlanFilePath == "" {
+		return ""
+	}
+	data, err := os.ReadFile(t.PlanFilePath)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func (m Model) currentWorkspaceName() string {

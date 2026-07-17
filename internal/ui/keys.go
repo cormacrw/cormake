@@ -27,6 +27,11 @@ type KeyMap struct {
 	Plan    key.Binding
 	Execute key.Binding
 
+	// Review opens the selected task's plan in revdiff for annotation, if
+	// it has one; annotations get sent back to claude as revision feedback
+	// automatically once revdiff exits.
+	Review key.Binding
+
 	// Switch which tab the detail pane's content area shows. 1/2/3 are fixed
 	// slots regardless of whether Plan is applicable, so they don't shift
 	// task to task; [ and ] cycle through whichever tabs are visible.
@@ -58,6 +63,7 @@ var keys = KeyMap{
 
 	Plan:    key.NewBinding(key.WithKeys("p")),
 	Execute: key.NewBinding(key.WithKeys("e")),
+	Review:  key.NewBinding(key.WithKeys("r")),
 
 	TabDescription: key.NewBinding(key.WithKeys("1")),
 	TabPlan:        key.NewBinding(key.WithKeys("2")),
@@ -70,4 +76,4 @@ var keys = KeyMap{
 	Help:    key.NewBinding(key.WithKeys("?")),
 }
 
-const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [a]rchive [w]orkspaces tabs:1-3/[/] [c]ancel [?]help [q]uit"
+const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [r]eview [a]rchive [w]orkspaces tabs:1-3/[/] [?]help [q]uit"

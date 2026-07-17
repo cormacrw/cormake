@@ -45,6 +45,11 @@ type Model struct {
 	repoName string
 	logs     map[string][]string
 
+	// planContent is the plan file's content, read from disk by the caller
+	// (claude writes it to ~/.claude/plans/, not anywhere this package
+	// knows about) and handed in via SetTask — this package just renders it.
+	planContent string
+
 	renderedDescription string
 	renderedPlan        string
 
@@ -82,10 +87,13 @@ func (m *Model) SetSize(w, h int) {
 // resetting to the Description tab — a predictable default rather than
 // carrying over whatever tab happened to be active for the last task.
 // repoName is the resolved display name, since Task only stores a RepoID.
-func (m *Model) SetTask(t domain.Task, repoName string) {
+// planContent is the plan file's content already read from disk, or empty
+// if the task has no plan yet.
+func (m *Model) SetTask(t domain.Task, repoName, planContent string) {
 	m.empty = false
 	m.task = t
 	m.repoName = repoName
+	m.planContent = planContent
 	m.activeTab = TabDescription
 	m.refreshRendered()
 	m.syncViewportContent()
@@ -99,11 +107,9 @@ func (m *Model) SetEmpty(msg string) {
 	m.emptyMessage = msg
 }
 
-// HasPlan reports whether the task has plan content to show — currently a
-// proxy for "ResultSummary is set", since Status alone can't tell (it keeps
-// moving forward past PLANNED once execution starts).
+// HasPlan reports whether the task has plan content to show.
 func (m Model) HasPlan() bool {
-	return strings.TrimSpace(m.task.ResultSummary) != ""
+	return strings.TrimSpace(m.planContent) != ""
 }
 
 // ShowDescription, ShowPlan, and ShowLog switch the active tab. ShowPlan is
@@ -139,6 +145,19 @@ func (m *Model) syncViewportContent() {
 		m.Viewport.SetContent(m.renderedDescription)
 	}
 	m.Viewport.SetYOffset(0)
+}
+
+// AppendLogLine adds a line to a task's log, live — used while a task is
+// actively running. If that task's Log tab is the one currently on screen,
+// the viewport updates immediately and stays scrolled to the bottom (tail
+// -f style); otherwise the line just waits in m.logs for whenever the user
+// switches to it.
+func (m *Model) AppendLogLine(taskID, line string) {
+	m.logs[taskID] = append(m.logs[taskID], line)
+	if m.task.ID == taskID && m.activeTab == TabLog {
+		m.Viewport.SetContent(strings.Join(m.logs[taskID], "\n"))
+		m.Viewport.GotoBottom()
+	}
 }
 
 // Scroll forwards a paging key straight to the content viewport, whichever
@@ -232,7 +251,7 @@ func (m Model) renderTabBar() string {
 func (m *Model) refreshRendered() {
 	m.renderedDescription = renderMarkdown(m.task.Description, m.width, "_no description_")
 	if m.HasPlan() {
-		m.renderedPlan = renderMarkdown(m.task.ResultSummary, m.width, "_no plan_")
+		m.renderedPlan = renderMarkdown(m.planContent, m.width, "_no plan_")
 	} else {
 		m.renderedPlan = ""
 	}

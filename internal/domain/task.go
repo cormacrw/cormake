@@ -51,6 +51,14 @@ type Task struct {
 	SessionID    string
 	WorktreeName string
 
+	// PlanFilePath points at the plan claude wrote during a plan-mode run.
+	// claude's plan-mode has a built-in, hardcoded allowance to write to
+	// ~/.claude/plans/ (confirmed directly — it ignores any other path
+	// instructed and lands there instead) while everything else stays
+	// genuinely read-only; cormake just watches for that Write/Edit and
+	// remembers where it landed, rather than owning the file itself.
+	PlanFilePath string
+
 	ResultSummary string
 	Cost          float64
 	ErrorMessage  string
