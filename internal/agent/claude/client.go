@@ -3,11 +3,9 @@
 package claude
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -33,9 +31,20 @@ const (
 	maxStartAttempts = 2
 )
 
+// tailDrainGrace is a short pause between the process ending (cmd.Wait
+// returning, for Start; ProcessAlive going false, for Attach) and closing
+// the tailers' stop channel — just enough to let a tailer's in-flight poll
+// pick up the last bytes the process wrote before exiting.
+const tailDrainGrace = 300 * time.Millisecond
+
+// livenessPollInterval is how often Attach checks whether the process it's
+// watching (which it did not itself start, and so cannot cmd.Wait on) is
+// still alive.
+const livenessPollInterval = time.Second
+
 func (Client) Start(ctx context.Context, spec agent.RunSpec) (*agent.Handle, error) {
 	var cmd *exec.Cmd
-	var stdout, stderr io.ReadCloser
+	var outFile, errFile *os.File
 	var err error
 
 	for attempt := 1; attempt <= maxStartAttempts; attempt++ {
@@ -43,20 +52,35 @@ func (Client) Start(ctx context.Context, spec agent.RunSpec) (*agent.Handle, err
 		// fresh one each attempt.
 		cmd = exec.CommandContext(ctx, "claude", BuildArgs(spec)...)
 		cmd.Dir = spec.RepoPath
-		// Own process group so Cancel can kill the whole tree (claude may
-		// spawn its own children), not just the immediate process.
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		// New session — not just a new process group — so the process
+		// survives cormake's controlling terminal closing (e.g. cormake
+		// quitting), not merely terminal-generated signals. A session
+		// leader is always its own process group leader too, so the
+		// existing Getpgid/Kill(-pgid, ...) signaling below needs no
+		// change.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
-		stdout, err = cmd.StdoutPipe()
+		outFile, err = os.OpenFile(spec.RawStdoutPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
 			return nil, err
 		}
-		stderr, err = cmd.StderrPipe()
+		errFile, err = os.OpenFile(spec.RawStderrPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
+			outFile.Close()
 			return nil, err
 		}
+		// Real files, not pipes: a full buffer never blocks the child's
+		// write(), regardless of whether cormake is currently reading (or
+		// running at all) — this is what lets the process outlive cormake
+		// pausing (tea.ExecProcess) or quitting entirely.
+		cmd.Stdout = outFile
+		cmd.Stderr = errFile
 
 		err = cmd.Start()
+		// The child gets its own dup'd fds on fork; our copies aren't
+		// needed after Start returns either way.
+		outFile.Close()
+		errFile.Close()
 		if err == nil {
 			break
 		}
@@ -66,22 +90,91 @@ func (Client) Start(ctx context.Context, spec agent.RunSpec) (*agent.Handle, err
 		time.Sleep(startRetryDelay)
 	}
 
+	pid := cmd.Process.Pid
 	events := make(chan agent.Event, 64)
+	stop := make(chan struct{})
 
-	// Both readers write to the same channel; only close it once both have
-	// hit EOF (process exit), or a send-after-close panic is possible if
-	// stderr is still producing lines after stdout's reader finishes first.
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); readStdout(spec.TaskID, stdout, events) }()
-	go func() { defer wg.Done(); readStderr(spec.TaskID, stderr, events) }()
+	go func() {
+		defer wg.Done()
+		tailFile(stop, spec.RawStdoutPath, 0, stdoutSink(spec.TaskID), func(ev agent.Event) { events <- ev })
+	}()
+	go func() {
+		defer wg.Done()
+		tailFile(stop, spec.RawStderrPath, 0, stderrSink(spec.TaskID), func(ev agent.Event) { events <- ev })
+	}()
 	go func() { wg.Wait(); close(events) }()
 
-	cancel := func() {
-		if cmd.Process == nil {
-			return
+	waitErrCh := make(chan error, 1)
+	go func() {
+		waitErrCh <- cmd.Wait()
+		time.Sleep(tailDrainGrace)
+		close(stop)
+	}()
+
+	cancel, kill := signalHandle(pid)
+	return &agent.Handle{
+		Events: events,
+		PID:    pid,
+		Cancel: cancel,
+		Kill:   kill,
+		Wait:   func() error { return <-waitErrCh },
+	}, nil
+}
+
+// Attach resumes tailing a process a previous Start call already launched
+// (spec.PID) instead of spawning a new one. There is no real parent/child
+// relationship here — cormake may not be, and after a restart never is,
+// this process's actual OS parent — so completion is judged by polling
+// ProcessAlive rather than cmd.Wait, and Wait always reports a nil error
+// (see agent.Handle.Wait's doc comment for how callers should judge
+// success/failure instead).
+func (Client) Attach(ctx context.Context, spec agent.AttachSpec) (*agent.Handle, error) {
+	events := make(chan agent.Event, 64)
+	stop := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		tailFile(stop, spec.RawStdoutPath, spec.Offset, stdoutSink(spec.TaskID), func(ev agent.Event) { events <- ev })
+	}()
+	go func() {
+		defer wg.Done()
+		// stderr isn't offset-tracked (see AttachSpec) — always re-tail
+		// from the start; a handful of already-seen stderr lines
+		// reappearing in the display log is cosmetic and low-stakes.
+		tailFile(stop, spec.RawStderrPath, 0, stderrSink(spec.TaskID), func(ev agent.Event) { events <- ev })
+	}()
+	go func() { wg.Wait(); close(events) }()
+
+	waitErrCh := make(chan error, 1)
+	go func() {
+		for ProcessAlive(spec.PID) {
+			time.Sleep(livenessPollInterval)
 		}
-		pgid, err := syscall.Getpgid(cmd.Process.Pid)
+		waitErrCh <- nil
+		time.Sleep(tailDrainGrace)
+		close(stop)
+	}()
+
+	cancel, kill := signalHandle(spec.PID)
+	return &agent.Handle{
+		Events: events,
+		PID:    spec.PID,
+		Cancel: cancel,
+		Kill:   kill,
+		Wait:   func() error { return <-waitErrCh },
+	}, nil
+}
+
+// signalHandle builds the Cancel/Kill closures shared by Start and Attach —
+// both just signal pid's process group, whether or not this process is the
+// one that actually started it.
+func signalHandle(pid int) (cancel, kill func()) {
+	cancel = func() {
+		pgid, err := syscall.Getpgid(pid)
 		if err != nil {
 			return
 		}
@@ -90,14 +183,20 @@ func (Client) Start(ctx context.Context, spec agent.RunSpec) (*agent.Handle, err
 			syscall.Kill(-pgid, syscall.SIGKILL)
 		})
 	}
-
-	// cmd.Wait must not be called until both pipes are fully drained (see
-	// os/exec docs), which readStdout/readStderr guarantee by running to
-	// EOF before wg.Wait() unblocks — so it's safe for the caller to call
-	// Wait() any time after it's done ranging over Events.
-	wait := cmd.Wait
-
-	return &agent.Handle{Events: events, Cancel: cancel, Wait: wait}, nil
+	// kill is cancel's immediate counterpart: no grace period, because a
+	// caller reaching for this (cormake quitting) may not be around long
+	// enough for cancel's delayed SIGKILL to ever fire — confirmed directly:
+	// a claude process that didn't die fast enough from SIGTERM survived as
+	// an orphan once cormake's own process (and so its time.AfterFunc timer)
+	// had already exited.
+	kill = func() {
+		pgid, err := syscall.Getpgid(pid)
+		if err != nil {
+			return
+		}
+		syscall.Kill(-pgid, syscall.SIGKILL)
+	}
+	return cancel, kill
 }
 
 // diagnoseStartError augments a failed cmd.Start() error with a fresh,
@@ -113,22 +212,4 @@ func diagnoseStartError(startErr error, cmd *exec.Cmd) error {
 		"%w [diagnostic: cmd.Path=%q cmd.Dir=%q fresh-LookPath=%q fresh-LookPath-err=%v process-cwd=%q process-cwd-err=%v PATH=%q]",
 		startErr, cmd.Path, cmd.Dir, lookPath, lookErr, wd, wdErr, os.Getenv("PATH"),
 	)
-}
-
-func readStdout(taskID string, r io.Reader, events chan<- agent.Event) {
-	scanner := bufio.NewScanner(r)
-	// tool_result lines can be large; grow well past the default 64KB cap.
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-	for scanner.Scan() {
-		for _, ev := range translateLine(taskID, scanner.Bytes()) {
-			events <- ev
-		}
-	}
-}
-
-func readStderr(taskID string, r io.Reader, events chan<- agent.Event) {
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		events <- agent.Event{TaskID: taskID, Type: agent.EventStderrLine, Text: scanner.Text()}
-	}
 }

@@ -51,6 +51,13 @@ type Task struct {
 	SessionID    string
 	WorktreeName string
 
+	// PID is the OS process ID of this task's live (or most-recently-run)
+	// claude process, if any — used to detect whether a task left
+	// Planning/InProgress by a previous cormake process actually survived a
+	// restart (see ui.reconnectTask), rather than assuming it didn't. 0 once
+	// the run has finished (see ui.handleTaskFinished).
+	PID int
+
 	// WorktreePath is the worktree's actual absolute path on disk, reported
 	// back by claude itself (its system/init "cwd") rather than assumed from
 	// WorktreeName — claude owns creating the worktree (see -w/--worktree),

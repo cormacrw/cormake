@@ -66,11 +66,20 @@ type Model struct {
 	// runner is the agent backend — claude.Client today, but kept behind
 	// the agent.Runner interface so nothing here is claude-specific.
 	// eventsCh is the shared fan-in channel every running task's forwarding
-	// goroutine writes to; active tracks cancel funcs by task ID (not wired
-	// to a key yet — that's the next piece).
+	// goroutine writes to; active tracks running handles by task ID. A
+	// running task's process is never killed just because cormake quits —
+	// see the removal of the old cancelAllActive — so active is purely
+	// bookkeeping for forwardEvents/deleteTask; no manual per-task Cancel
+	// key wired up yet, that's still a future piece.
 	runner   agent.Runner
 	eventsCh chan tea.Msg
-	active   map[string]func()
+	active   map[string]*agent.Handle
+
+	// resultSeen tracks, per task ID, whether an EventResult has been
+	// observed for its current run — the primary signal handleTaskFinished
+	// uses to decide success vs. failure, since an Attach-produced Handle's
+	// Wait() has no real exit code to report (see agent.Handle.Wait).
+	resultSeen map[string]bool
 
 	width, height int
 }
@@ -82,6 +91,12 @@ type taskFinishedMsg struct {
 	TaskID string
 	Err    error
 }
+
+// reconnectTaskMsg signals that a task loaded at startup was left mid-run
+// (see Init) and should be reconnected — routed through Update rather than
+// handled directly in Init, since Init has a value receiver and can't
+// mutate the model it returns.
+type reconnectTaskMsg struct{ TaskID string }
 
 func New(st *store.Store) (Model, error) {
 	workspaces, err := st.LoadWorkspaces()
@@ -107,6 +122,22 @@ func New(st *store.Store) (Model, error) {
 		return Model{}, err
 	}
 
+	// Eager-load every task's persisted log up front — a small personal
+	// task list, not thousands of entries, so this is simpler than lazily
+	// loading on first display and risking a task whose log never gets
+	// loaded at all.
+	logs := make(map[string][]string)
+	for _, t := range tasks {
+		lines, err := st.LoadLog(t.ID)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "cormake: failed to load log for", t.ID+":", err)
+			continue
+		}
+		if lines != nil {
+			logs[t.ID] = lines
+		}
+	}
+
 	repoNames := make(map[string]string)
 	for _, w := range workspaces {
 		for _, r := range w.Repos {
@@ -130,19 +161,34 @@ func New(st *store.Store) (Model, error) {
 		tasks:         tasks,
 		repoNames:     repoNames,
 		tasklist:      tasklist.New(nil),
-		detail:        detail.New(map[string][]string{}),
+		detail:        detail.New(logs),
 		newTaskInput:  ti,
 		completeInput: ci,
 		runner:        claude.Client{},
 		eventsCh:      make(chan tea.Msg, 64),
-		active:        make(map[string]func()),
+		active:        make(map[string]*agent.Handle),
+		resultSeen:    make(map[string]bool),
 	}
 	m.refreshTaskList()
 	return m, nil
 }
 
+// Init kicks off listening for agent events plus, for every task loaded
+// from disk still showing PLANNING or IN_PROGRESS, a reconnectTaskMsg —
+// there's no live goroutine watching such a task yet in this cormake
+// process, whether its run is still genuinely alive (most likely, since
+// quitting no longer kills it — see reconnectTask), already finished while
+// cormake was away, or actually died; reconnectTask (triggered by that
+// message, in Update) sorts out which and reconnects accordingly.
 func (m Model) Init() tea.Cmd {
-	return waitForEvent(m.eventsCh)
+	cmds := []tea.Cmd{waitForEvent(m.eventsCh)}
+	for _, t := range m.tasks {
+		if t.Status == domain.StatusPlanning || t.Status == domain.StatusInProgress {
+			taskID := t.ID
+			cmds = append(cmds, func() tea.Msg { return reconnectTaskMsg{TaskID: taskID} })
+		}
+	}
+	return tea.Batch(cmds...)
 }
 
 // waitForEvent is the standard bubbletea "drain a channel" command: it
@@ -183,6 +229,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case taskFinishedMsg:
 		m.handleTaskFinished(msg)
 		return m, waitForEvent(m.eventsCh)
+
+	case reconnectTaskMsg:
+		m.reconnectTask(msg.TaskID)
+		return m, nil
 
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
@@ -495,10 +545,10 @@ func (m *Model) startCompleteTask(branch string) tea.Cmd {
 	}
 	repoPath, ok := m.repoPath(target.RepoID)
 	if !ok || repoPath == "" {
-		m.detail.AppendLogLine(target.ID, logCormakeLine("cannot complete — task has no repo assigned"))
+		m.appendLogLine(target.ID, logCormakeLine("cannot complete — task has no repo assigned"))
 		return nil
 	}
-	m.detail.AppendLogLine(target.ID, logCormakeLine("finalizing onto branch "+branch))
+	m.appendLogLine(target.ID, logCormakeLine("finalizing onto branch "+branch))
 	return completeTaskCmd(target.ID, repoPath, target.WorktreePath, branch, "cormake: "+target.Title)
 }
 
@@ -510,7 +560,7 @@ func (m *Model) startCompleteTask(branch string) tea.Cmd {
 // worktree intact — so nothing is lost and completing can be retried.
 func (m *Model) handleCompleteFinished(msg completeFinishedMsg) {
 	if msg.err != nil {
-		m.detail.AppendLogLine(msg.taskID, logCormakeLine("failed to complete: "+msg.err.Error()))
+		m.appendLogLine(msg.taskID, logCormakeLine("failed to complete: "+msg.err.Error()))
 		return
 	}
 	for i := range m.tasks {
@@ -647,6 +697,20 @@ func (m *Model) persistTask(t domain.Task) {
 	}
 }
 
+// appendLogLine is the single choke point for adding a line to a task's Log
+// tab: it updates the in-memory detail view (so it shows up immediately)
+// and persists it to disk (so it survives quitting and relaunching cormake
+// — see internal/store/logs.go), best-effort like persistTask.
+func (m *Model) appendLogLine(taskID, line string) {
+	m.detail.AppendLogLine(taskID, line)
+	if m.store == nil {
+		return
+	}
+	if err := m.store.AppendLogLine(taskID, line); err != nil {
+		fmt.Fprintln(os.Stderr, "cormake: failed to persist log line for", taskID+":", err)
+	}
+}
+
 // digitIndex parses a single-digit '1'-'9' key into a zero-based index.
 func digitIndex(s string) (int, bool) {
 	if len(s) != 1 || s[0] < '1' || s[0] > '9' {
@@ -721,6 +785,12 @@ func (m *Model) archiveSelected() {
 // Unconditional by design — the confirmation modal is the only gate, there's
 // no Status restriction like archiveSelected's CanArchive check.
 func (m *Model) deleteTask(id string) {
+	// A deleted task's live process (if any) shouldn't keep running against
+	// a worktree that's about to disappear.
+	if h, ok := m.active[id]; ok {
+		h.Kill()
+		delete(m.active, id)
+	}
 	for i, t := range m.tasks {
 		if t.ID == id {
 			m.tasks = append(m.tasks[:i], m.tasks[i+1:]...)
@@ -785,7 +855,7 @@ func (m *Model) startPlanRun() tea.Cmd {
 func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.Cmd {
 	repoPath, ok := m.repoPath(t.RepoID)
 	if !ok || repoPath == "" {
-		m.detail.AppendLogLine(t.ID, logCormakeLine("cannot start — task has no repo assigned"))
+		m.appendLogLine(t.ID, logCormakeLine("cannot start — task has no repo assigned"))
 		return nil
 	}
 
@@ -795,6 +865,8 @@ func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.
 		RepoPath:        repoPath,
 		Mode:            agent.RunModePlan,
 		ResumeSessionID: resumeSessionID,
+		RawStdoutPath:   m.store.RawStdoutPath(t.ID),
+		RawStderrPath:   m.store.RawStderrPath(t.ID),
 	}
 	sessionID := resumeSessionID
 	if sessionID == "" {
@@ -804,21 +876,30 @@ func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.
 
 	handle, err := m.runner.Start(context.Background(), spec)
 	if err != nil {
-		m.detail.AppendLogLine(t.ID, logCormakeLine("failed to start: "+err.Error()))
+		m.appendLogLine(t.ID, logCormakeLine("failed to start: "+err.Error()))
 		return nil
+	}
+
+	// Start truncates the raw stdout file, so any offset left over from a
+	// previous run must be reset — otherwise a later reconnect would read
+	// from a stale position past the end of this shorter, freshly-truncated
+	// file and silently miss this run's output entirely.
+	if err := m.store.SaveOffset(t.ID, 0); err != nil {
+		fmt.Fprintln(os.Stderr, "cormake: failed to reset offset for", t.ID+":", err)
 	}
 
 	for i := range m.tasks {
 		if m.tasks[i].ID == t.ID {
 			m.tasks[i].Status = domain.StatusPlanning
 			m.tasks[i].SessionID = sessionID
+			m.tasks[i].PID = handle.PID
 			m.persistTask(m.tasks[i])
 			break
 		}
 	}
 	m.refreshTaskList()
 
-	m.active[t.ID] = handle.Cancel
+	m.active[t.ID] = handle
 	go forwardEvents(m.eventsCh, t.ID, handle)
 
 	return nil
@@ -851,7 +932,7 @@ func (m *Model) startExecuteRun() tea.Cmd {
 func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) tea.Cmd {
 	repoPath, ok := m.repoPath(t.RepoID)
 	if !ok || repoPath == "" {
-		m.detail.AppendLogLine(t.ID, logCormakeLine("cannot start — task has no repo assigned"))
+		m.appendLogLine(t.ID, logCormakeLine("cannot start — task has no repo assigned"))
 		return nil
 	}
 
@@ -866,13 +947,13 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 		baseRef = gitHeadRef(repoPath)
 		path, err := createWorktree(repoPath, wtName)
 		if err != nil {
-			m.detail.AppendLogLine(t.ID, logCormakeLine("failed to create worktree: "+err.Error()))
+			m.appendLogLine(t.ID, logCormakeLine("failed to create worktree: "+err.Error()))
 			return nil
 		}
 		worktreePath = path
 	}
 	if worktreePath == "" {
-		m.detail.AppendLogLine(t.ID, logCormakeLine("cannot resume — task has no worktree"))
+		m.appendLogLine(t.ID, logCormakeLine("cannot resume — task has no worktree"))
 		return nil
 	}
 
@@ -882,6 +963,8 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 		RepoPath:        worktreePath,
 		Mode:            agent.RunModeComplete,
 		ResumeSessionID: resumeSessionID,
+		RawStdoutPath:   m.store.RawStdoutPath(t.ID),
+		RawStderrPath:   m.store.RawStderrPath(t.ID),
 	}
 	if resumeSessionID == "" {
 		spec.SessionID = sessionID
@@ -889,8 +972,14 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 
 	handle, err := m.runner.Start(context.Background(), spec)
 	if err != nil {
-		m.detail.AppendLogLine(t.ID, logCormakeLine("failed to start: "+err.Error()))
+		m.appendLogLine(t.ID, logCormakeLine("failed to start: "+err.Error()))
 		return nil
+	}
+
+	// See runPlanAgent's identical reset: Start truncates the raw stdout
+	// file, so a stale offset from a previous run must not linger.
+	if err := m.store.SaveOffset(t.ID, 0); err != nil {
+		fmt.Fprintln(os.Stderr, "cormake: failed to reset offset for", t.ID+":", err)
 	}
 
 	for i := range m.tasks {
@@ -900,13 +989,14 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 			m.tasks[i].WorktreeName = wtName
 			m.tasks[i].WorktreeBaseRef = baseRef
 			m.tasks[i].WorktreePath = worktreePath
+			m.tasks[i].PID = handle.PID
 			m.persistTask(m.tasks[i])
 			break
 		}
 	}
 	m.refreshTaskList()
 
-	m.active[t.ID] = handle.Cancel
+	m.active[t.ID] = handle
 	go forwardEvents(m.eventsCh, t.ID, handle)
 
 	return nil
@@ -948,7 +1038,7 @@ func shortTaskID(id string) string {
 // rather than two.
 func (m *Model) handleRevdiffFinished(msg revdiffFinishedMsg) tea.Cmd {
 	if msg.err != nil {
-		m.detail.AppendLogLine(msg.taskID, logCormakeLine("revdiff failed: "+msg.err.Error()))
+		m.appendLogLine(msg.taskID, logCormakeLine("revdiff failed: "+msg.err.Error()))
 		return nil
 	}
 	if msg.annotations == "" {
@@ -959,7 +1049,7 @@ func (m *Model) handleRevdiffFinished(msg revdiffFinishedMsg) tea.Cmd {
 		if t.ID != msg.taskID {
 			continue
 		}
-		m.detail.AppendLogLine(t.ID, logCormakeLine("sending review feedback to claude for revision"))
+		m.appendLogLine(t.ID, logCormakeLine("sending review feedback to claude for revision"))
 		if msg.kind == reviewKindExecute {
 			return m.runExecuteAgent(t, buildExecuteRevisePrompt(msg.annotations), t.SessionID)
 		}
@@ -1069,7 +1159,7 @@ func forwardEvents(eventsCh chan<- tea.Msg, taskID string, h *agent.Handle) {
 // which affect how the line reads, so they're kept out of formatAgentLogLine
 // entirely.
 func (m *Model) handleAgentEvent(ev agent.Event) {
-	m.detail.AppendLogLine(ev.TaskID, formatAgentLogLine(ev))
+	m.appendLogLine(ev.TaskID, formatAgentLogLine(ev))
 
 	switch ev.Type {
 	case agent.EventToolUse:
@@ -1077,12 +1167,23 @@ func (m *Model) handleAgentEvent(ev agent.Event) {
 			m.setPlanFilePath(ev.TaskID, path)
 		}
 	case agent.EventResult:
+		m.resultSeen[ev.TaskID] = true
 		for i := range m.tasks {
 			if m.tasks[i].ID == ev.TaskID {
 				m.tasks[i].ResultSummary = ev.ResultText
 				m.tasks[i].Cost = ev.CostUSD
 				break
 			}
+		}
+	}
+
+	// Persist how far into the raw stdout file this task has been
+	// translated (unset/0 for stderr-derived events, which aren't
+	// offset-tracked — see agent.AttachSpec) so a later Attach/replay
+	// resumes from here instead of re-emitting duplicate display-log lines.
+	if m.store != nil && ev.Type != agent.EventStderrLine && ev.Type != agent.EventProcessError {
+		if err := m.store.SaveOffset(ev.TaskID, ev.Offset); err != nil {
+			fmt.Fprintln(os.Stderr, "cormake: failed to save offset for", ev.TaskID+":", err)
 		}
 	}
 }
@@ -1137,25 +1238,38 @@ func (m *Model) setPlanFilePath(taskID, path string) {
 	m.syncDetail()
 }
 
-// handleTaskFinished reacts to the running process actually exiting: a
-// successful plan run moves Planning -> Planned, a successful execute run
-// moves InProgress -> ReadyForReview, and any non-zero exit moves it to
-// Failed regardless of which kind of run it was. Note this doesn't yet
-// distinguish "genuinely failed" from "user cancelled" (both look like a
-// non-nil Wait() error) since there's no way to trigger Cancel from the UI
-// yet — that's the next piece.
+// handleTaskFinished reacts to a run being over: a successful plan run
+// moves Planning -> Planned, a successful execute run moves InProgress ->
+// ReadyForReview, and anything else moves it to Failed. "Successful" is
+// judged primarily by resultSeen (did an EventResult ever come through for
+// this task's current run) rather than msg.Err alone — an Attach-produced
+// Handle has no real exit code to report (see agent.Handle.Wait), so its
+// Err is always nil, and resultSeen is the only way to tell "it finished
+// cleanly" apart from "the process just vanished". A real Err (from a
+// Start-produced Handle's actual process exit) still wins when present.
+// This doesn't yet distinguish "genuinely failed" from "user cancelled"
+// (both look the same here) since there's no way to trigger Cancel from
+// the UI yet — that's still a future piece.
 func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 	delete(m.active, msg.TaskID)
+	sawResult := m.resultSeen[msg.TaskID]
+	delete(m.resultSeen, msg.TaskID)
+
 	for i := range m.tasks {
 		if m.tasks[i].ID != msg.TaskID {
 			continue
 		}
-		if msg.Err != nil {
+		m.tasks[i].PID = 0
+		switch {
+		case msg.Err != nil:
 			m.tasks[i].Status = domain.StatusFailed
 			m.tasks[i].ErrorMessage = msg.Err.Error()
-		} else if m.tasks[i].Status == domain.StatusPlanning {
+		case !sawResult:
+			m.tasks[i].Status = domain.StatusFailed
+			m.tasks[i].ErrorMessage = "process ended without completing"
+		case m.tasks[i].Status == domain.StatusPlanning:
 			m.tasks[i].Status = domain.StatusPlanned
-		} else if m.tasks[i].Status == domain.StatusInProgress {
+		case m.tasks[i].Status == domain.StatusInProgress:
 			m.tasks[i].Status = domain.StatusReadyForReview
 		}
 		m.persistTask(m.tasks[i])
@@ -1163,6 +1277,105 @@ func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 	}
 	m.refreshTaskList()
 	m.syncDetail()
+}
+
+// reconnectPlanPrompt/reconnectExecutePrompt are sent instead of the
+// original buildPrompt/buildExecutePrompt when reconnectTask falls back to
+// respawning a task left mid-run by a previous cormake process (its
+// recorded process genuinely didn't survive — see reconnectTask) — worded
+// to handle both real possibilities honestly, since there's no way to know
+// from here whether the old run actually finished before it died or
+// genuinely still has work left.
+const reconnectPlanPrompt = "cormake was restarted and is reconnecting to this in-progress planning session. " +
+	"If the plan is already written, just confirm it's in place; otherwise continue researching and write it up."
+
+var reconnectExecutePrompt = "cormake was restarted and is reconnecting to this in-progress session. " +
+	"If the task is already complete, just summarize what was implemented; otherwise continue and finish it." +
+	executeSummaryInstruction
+
+// reconnectTask handles a task Init found still PLANNING or IN_PROGRESS at
+// startup. Quitting cormake no longer kills a task's process (see the
+// removed cancelAllActive), so there are three real possibilities, checked
+// in order:
+//
+//  1. The recorded PID is still alive → reattach a tailer to it (via
+//     m.runner.Attach) from the stored offset. No new process is spawned;
+//     this is the common case for "closed cormake, or switched to another
+//     tool, and it kept running".
+//  2. The PID is dead, but replaying the raw stdout file from the stored
+//     offset turns up a result → the run already finished while cormake
+//     was away. Feed the replayed events through the normal handling (so
+//     any trailing display-log lines/plan-file detection still happen),
+//     then finalize via handleTaskFinished directly — nothing to spawn.
+//  3. The PID is dead and no result was ever produced → genuinely
+//     interrupted (a real crash, or an old run from before this feature
+//     existed with no PID on record at all). Fall back to the previous
+//     behavior: respawn via runPlanAgent/runExecuteAgent with --resume,
+//     picking the session back up from claude's own persisted transcript.
+func (m *Model) reconnectTask(taskID string) {
+	var t domain.Task
+	found := false
+	for _, task := range m.tasks {
+		if task.ID == taskID {
+			t = task
+			found = true
+			break
+		}
+	}
+	if !found || t.SessionID == "" {
+		return
+	}
+
+	if t.PID != 0 && claude.ProcessAlive(t.PID) {
+		offset, err := m.store.LoadOffset(t.ID)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "cormake: failed to load offset for", t.ID+":", err)
+		}
+		handle, err := m.runner.Attach(context.Background(), agent.AttachSpec{
+			TaskID:        t.ID,
+			PID:           t.PID,
+			RawStdoutPath: m.store.RawStdoutPath(t.ID),
+			RawStderrPath: m.store.RawStderrPath(t.ID),
+			Offset:        offset,
+		})
+		if err == nil {
+			m.appendLogLine(t.ID, logCormakeLine(fmt.Sprintf("cormake restarted — reattaching to still-running session (pid %d)", t.PID)))
+			m.active[t.ID] = handle
+			go forwardEvents(m.eventsCh, t.ID, handle)
+			return
+		}
+		fmt.Fprintln(os.Stderr, "cormake: failed to attach to pid", t.PID, "for", t.ID+":", err)
+	}
+
+	offset, err := m.store.LoadOffset(t.ID)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cormake: failed to load offset for", t.ID+":", err)
+	}
+	events, newOffset := claude.ReplayFile(t.ID, m.store.RawStdoutPath(t.ID), offset)
+	for _, ev := range events {
+		m.handleAgentEvent(ev)
+	}
+	if err := m.store.SaveOffset(t.ID, newOffset); err != nil {
+		fmt.Fprintln(os.Stderr, "cormake: failed to save offset for", t.ID+":", err)
+	}
+	if m.resultSeen[t.ID] {
+		m.appendLogLine(t.ID, logCormakeLine("cormake restarted — the run had already finished"))
+		m.handleTaskFinished(taskFinishedMsg{TaskID: t.ID})
+		return
+	}
+
+	m.appendLogLine(t.ID, logCormakeLine("cormake restarted — reconnecting to interrupted session"))
+
+	switch t.Status {
+	case domain.StatusPlanning:
+		m.runPlanAgent(t, reconnectPlanPrompt, t.SessionID)
+	case domain.StatusInProgress:
+		if t.WorktreePath == "" {
+			m.appendLogLine(t.ID, logCormakeLine("cannot reconnect — task has no worktree on record"))
+			return
+		}
+		m.runExecuteAgent(t, reconnectExecutePrompt, t.SessionID)
+	}
 }
 
 // setWorkspace sets the active workspace by index and refreshes the task

@@ -16,13 +16,16 @@ type Store struct {
 	dir string
 }
 
-// Open ensures the store's directory (and its tasks/ subdirectory) exist
-// and returns a Store rooted there.
+// Open ensures the store's directory (and its tasks/ and logs/
+// subdirectories) exist and returns a Store rooted there.
 func Open(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Join(dir, "tasks"), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o755); err != nil {
 		return nil, err
 	}
 	return &Store{dir: dir}, nil
@@ -117,12 +120,20 @@ func (s *Store) SaveTask(t domain.Task) error {
 	return writeFileAtomic(s.taskPath(t.ID), data, 0o644)
 }
 
-// DeleteTask removes a task's file from disk. Deleting an already-gone task
-// is not an error — the end state (no file on disk) is what's asked for.
+// DeleteTask removes a task's file from disk, along with its persisted log
+// (see logs.go) and raw stdout/stderr/offset files (see offset.go) —
+// deleting a task is meant to fully remove it, not leave stray files
+// behind. Deleting an already-gone task is not an error — the end state (no
+// files on disk) is what's asked for.
 func (s *Store) DeleteTask(id string) error {
 	err := os.Remove(s.taskPath(id))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
-	return err
+	// Best-effort; a missing file is fine.
+	_ = os.Remove(s.logPath(id))
+	_ = os.Remove(s.RawStdoutPath(id))
+	_ = os.Remove(s.RawStderrPath(id))
+	_ = os.Remove(s.offsetPath(id))
+	return nil
 }

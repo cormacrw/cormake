@@ -162,31 +162,41 @@ func (m *Model) syncViewportContent() {
 	case TabSummary:
 		m.Viewport.SetContent(m.renderedSummary)
 	case TabLog:
-		m.Viewport.SetContent(strings.Join(m.logs[m.task.ID], "\n"))
+		m.Viewport.SetContent(m.renderLog(m.task.ID))
 	default:
 		m.Viewport.SetContent(m.renderedDescription)
 	}
 	m.Viewport.SetYOffset(0)
 }
 
+// renderLog joins a task's stored log lines and wraps the result to the
+// pane's current width. Wrapping happens here, at render time, rather than
+// baked into each line when it's stored — m.logs may include lines loaded
+// back from a previous session (see AppendLogLine), persisted at whatever
+// width was current then, or none at all; wrapping fresh on every render
+// keeps it honest for the terminal size actually in front of the user now.
+// The viewport itself doesn't wrap: anything wider than it just overflows
+// and gets hard-clipped by the terminal at whatever column it hits,
+// mid-word, even slicing into the pane's own border character (confirmed
+// directly).
+func (m Model) renderLog(taskID string) string {
+	content := strings.Join(m.logs[taskID], "\n")
+	if m.width > 0 {
+		content = lipgloss.NewStyle().Width(m.width).Render(content)
+	}
+	return content
+}
+
 // AppendLogLine adds a line to a task's log, live — used while a task is
 // actively running. If that task's Log tab is the one currently on screen,
 // the viewport updates immediately and stays scrolled to the bottom (tail
 // -f style); otherwise the line just waits in m.logs for whenever the user
-// switches to it.
-//
-// The viewport itself doesn't wrap long lines — anything wider than it just
-// overflows and gets hard-clipped/wrapped by the terminal at whatever
-// column it happens to hit, mid-word, even slicing into the pane's own
-// border character (confirmed directly). Wrapping here, at append time
-// while m.width is known, keeps every line's visible width honest instead.
+// switches to it. Persisting it to disk is the caller's job (see
+// app.go's appendLogLine) — this package has no filesystem concerns.
 func (m *Model) AppendLogLine(taskID, line string) {
-	if m.width > 0 {
-		line = lipgloss.NewStyle().Width(m.width).Render(line)
-	}
 	m.logs[taskID] = append(m.logs[taskID], line)
 	if m.task.ID == taskID && m.activeTab == TabLog {
-		m.Viewport.SetContent(strings.Join(m.logs[taskID], "\n"))
+		m.Viewport.SetContent(m.renderLog(taskID))
 		m.Viewport.GotoBottom()
 	}
 }
