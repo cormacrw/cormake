@@ -12,7 +12,7 @@ cormake is a terminal "command center" for delegating coding work to Claude. It'
 
 **Permission posture.** Complete-mode tasks default to a **low-friction posture**: Claude's built-in `acceptEdits` permission mode auto-approves file edits and common filesystem commands (`mkdir`, `touch`, `mv`, `cp`) inside the worktree with no interruption, while a live approval hook (see §4) catches everything riskier — arbitrary shell commands, network access, git push, and so on — and surfaces it in the TUI for a real decision. This was a deliberate choice over a maximum-lockdown "approve literally everything" posture: the worktree is already the isolation boundary, so the friction budget is spent on things that actually matter.
 
-**Worktrees as the isolation boundary.** Every complete-mode task gets its own git worktree, created once at `<repo>/.claude/worktrees/<task-slug>` and reused across retries of the same task. This is what makes "let Claude work autonomously" safe to say: nothing it does touches your actual working copy or main branch until you decide to merge it.
+**Worktrees as the isolation boundary.** Every complete-mode task gets its own git worktree, created once at `<repo>/.claude/worktrees/<task-id>` and reused across retries of the same task. `<task-id>` is the task's readable id (e.g. `acme-7`, lowercased) — its prefix comes from the owning workspace, so the worktree directory and branch name are easy to match back to the task at a glance. This is what makes "let Claude work autonomously" safe to say: nothing it does touches your actual working copy or main branch until you decide to merge it.
 
 ## 3. How task execution actually works
 

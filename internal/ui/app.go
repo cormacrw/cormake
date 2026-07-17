@@ -665,9 +665,10 @@ func (m *Model) createTask(title string) {
 	if len(m.workspaces) == 0 {
 		return
 	}
-	ws := m.workspaces[m.activeWS]
+	ws := &m.workspaces[m.activeWS]
 	t := domain.Task{
 		ID:          uuid.NewString(),
+		DisplayID:   ws.NextDisplayID(),
 		WorkspaceID: ws.ID,
 		Title:       title,
 		Status:      domain.StatusTodo,
@@ -679,6 +680,7 @@ func (m *Model) createTask(title string) {
 	}
 	m.tasks = append(m.tasks, t)
 	m.persistTask(t)
+	m.persistWorkspaces()
 	m.showArchive = false // a fresh TODO task belongs in the Open view
 	m.refreshTaskList()
 	m.tasklist.SelectByID(t.ID)
@@ -694,6 +696,19 @@ func (m *Model) persistTask(t domain.Task) {
 	}
 	if err := m.store.SaveTask(t); err != nil {
 		fmt.Fprintln(os.Stderr, "cormake: failed to save task", t.ID+":", err)
+	}
+}
+
+// persistWorkspaces saves the full workspace set to disk, best-effort, same
+// pattern as persistTask — used after mutating a workspace's
+// NextTaskNumber (see NextDisplayID) since SaveWorkspaces overwrites the
+// whole file.
+func (m *Model) persistWorkspaces() {
+	if m.store == nil {
+		return
+	}
+	if err := m.store.SaveWorkspaces(m.workspaces); err != nil {
+		fmt.Fprintln(os.Stderr, "cormake: failed to save workspaces:", err)
 	}
 }
 
@@ -943,7 +958,7 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 
 	if sessionID == "" {
 		sessionID = uuid.NewString()
-		wtName = worktreeName(t.ID)
+		wtName = worktreeName(t)
 		baseRef = gitHeadRef(repoPath)
 		path, err := createWorktree(repoPath, wtName)
 		if err != nil {
@@ -1014,10 +1029,15 @@ func gitHeadRef(repoPath string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// worktreeName derives a short, git-branch-safe worktree name from a task's
-// ID, e.g. "task-a1b2c3d4".
-func worktreeName(taskID string) string {
-	return "task-" + shortTaskID(taskID)
+// worktreeName derives a git-branch-safe worktree name from a task, e.g.
+// "acme-7" for a task with DisplayID "ACME-7". Falls back to the
+// pre-readable-ID scheme ("task-a1b2c3d4") for tasks created before
+// DisplayID existed.
+func worktreeName(t domain.Task) string {
+	if t.DisplayID != "" {
+		return strings.ToLower(t.DisplayID)
+	}
+	return "task-" + shortTaskID(t.ID)
 }
 
 // shortTaskID returns a task ID's UUID first segment (8 hex chars) — short

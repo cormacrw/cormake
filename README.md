@@ -28,9 +28,9 @@ All state — workspaces, repos, tasks, session transcripts — is stored as fla
 
 ## Concepts
 
-- **Workspace** — a named grouping of git repos plus the tasks created against them. A default workspace is created on first run but starts empty.
+- **Workspace** — a named grouping of git repos plus the tasks created against them. A default workspace is created on first run but starts empty. Each workspace has its own readable-id `Prefix` (e.g. `ACME`, hand-set by editing `workspaces.json`; auto-derived from the workspace name if unset) used to number its tasks.
 - **Repo** — a git repo added to a workspace; tasks created in that workspace pick one of its repos.
-- **Task** — has a title, description, workspace, repo, mode (`plan`/`execute`), and moves through a status lifecycle from creation to completion. Execute-mode tasks run in their own worktree at `<repo>/.claude/worktrees/<task-slug>`, so nothing they do touches your main working copy until you merge it.
+- **Task** — has a title, description, workspace, repo, mode (`plan`/`execute`), and moves through a status lifecycle from creation to completion. Each task gets a short readable id from its workspace's prefix (e.g. `ACME-7`). Execute-mode tasks run in their own worktree at `<repo>/.claude/worktrees/<task-id>` (named after that readable id, lowercased, so the worktree/branch is easy to match back to the task), so nothing they do touches your main working copy until you merge it.
 
 ## Keybindings
 

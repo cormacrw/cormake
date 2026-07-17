@@ -35,7 +35,14 @@ const (
 )
 
 type Task struct {
-	ID          string
+	ID string
+
+	// DisplayID is the workspace-scoped human-readable id (e.g. "ACME-7"),
+	// set once at creation via Workspace.NextDisplayID and immutable after.
+	// ID (the UUID) remains the on-disk filename/lookup key; DisplayID is
+	// purely an additional human-facing label.
+	DisplayID string
+
 	WorkspaceID string
 	RepoID      string
 	Title       string

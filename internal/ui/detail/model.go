@@ -223,7 +223,7 @@ func (m Model) View() string {
 // eat into the content viewport's height below it.
 func (m Model) renderHeader() string {
 	stage, glyph := m.task.DisplayStage()
-	title := titleStyle.Render(truncate(m.task.Title, m.width-8)) + " #" + shortID(m.task.ID)
+	title := titleStyle.Render(truncate(m.task.Title, m.width-8)) + " #" + displayLabel(m.task)
 	// Workspace isn't shown here — the app's top bar already names the
 	// active workspace, so repeating it in every task's header is redundant.
 	metaText := fmt.Sprintf("repo: %s   %s %s", m.repoName, glyph, stage)
@@ -328,6 +328,15 @@ func renderMarkdown(md string, width int, emptyText string) string {
 		return md
 	}
 	return strings.TrimRight(out, "\n")
+}
+
+// displayLabel returns t's readable id if set, else falls back to the
+// truncated UUID for tasks created before DisplayID existed.
+func displayLabel(t domain.Task) string {
+	if t.DisplayID != "" {
+		return t.DisplayID
+	}
+	return shortID(t.ID)
 }
 
 func shortID(id string) string {
