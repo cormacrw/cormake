@@ -17,6 +17,11 @@ type KeyMap struct {
 	// you can always archive a task, whatever it's doing.
 	Archive key.Binding
 
+	// Delete permanently removes the selected task, from any stage, behind
+	// a confirmation modal (same gate as Plan/Execute, but no Status
+	// eligibility check — delete works no matter what stage the task is in).
+	Delete key.Binding
+
 	Open       key.Binding // enters edit mode for the selected task's title/body
 	Workspaces key.Binding // opens the workspace-picker modal
 
@@ -57,6 +62,7 @@ var keys = KeyMap{
 	Quit:   key.NewBinding(key.WithKeys("q")),
 
 	Archive: key.NewBinding(key.WithKeys("a")),
+	Delete:  key.NewBinding(key.WithKeys("d")),
 
 	Open:       key.NewBinding(key.WithKeys("enter")),
 	Workspaces: key.NewBinding(key.WithKeys("w")),
@@ -76,4 +82,4 @@ var keys = KeyMap{
 	Help:    key.NewBinding(key.WithKeys("?")),
 }
 
-const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [r]eview [a]rchive [w]orkspaces tabs:1-3/[/] [?]help [q]uit"
+const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [r]eview [a]rchive [d]elete [w]orkspaces tabs:1-3/[/] [?]help [q]uit"

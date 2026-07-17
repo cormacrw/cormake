@@ -116,3 +116,13 @@ func (s *Store) SaveTask(t domain.Task) error {
 	}
 	return writeFileAtomic(s.taskPath(t.ID), data, 0o644)
 }
+
+// DeleteTask removes a task's file from disk. Deleting an already-gone task
+// is not an error — the end state (no file on disk) is what's asked for.
+func (s *Store) DeleteTask(id string) error {
+	err := os.Remove(s.taskPath(id))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}

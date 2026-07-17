@@ -47,8 +47,10 @@ type Model struct {
 
 	confirmModalOpen bool
 	confirmMessage   string
+	confirmKind      confirmKind
 	confirmTo        domain.Status
 	confirmFrom      []domain.Status
+	confirmTaskID    string
 
 	repoNames map[string]string
 
@@ -205,6 +207,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.archiveSelected()
 			return m, nil
 
+		case key.Matches(msg, keys.Delete):
+			m.openDeleteConfirm()
+			return m, nil
+
 		case key.Matches(msg, keys.Open):
 			if t, ok := m.tasklist.Selected(); ok {
 				return m, openInEditorCmd(t)
@@ -342,6 +348,18 @@ func (m *Model) reloadWorkspaces() {
 	m.refreshTaskList()
 }
 
+// confirmKind distinguishes what a pending confirmation modal will do once
+// confirmed — a Status transition (Plan/Execute) or an unconditional delete.
+// Kept as plain data on Model rather than a stored closure: Update has a
+// value receiver, so a new Model copy exists by the time "y" is handled, and
+// a closure captured over the old *Model would be acting on a stale snapshot.
+type confirmKind int
+
+const (
+	confirmKindTransition confirmKind = iota
+	confirmKindDelete
+)
+
 // openConfirm stages a Plan/Execute status change behind a confirmation
 // modal — but only if the selected task is actually eligible (in one of
 // allowedFrom); an ineligible task stays a silent no-op, same as before
@@ -363,17 +381,37 @@ func (m *Model) openConfirm(verb string, to domain.Status, allowedFrom ...domain
 	}
 	m.confirmModalOpen = true
 	m.confirmMessage = fmt.Sprintf("%s %q?", verb, t.Title)
+	m.confirmKind = confirmKindTransition
 	m.confirmTo = to
 	m.confirmFrom = allowedFrom
 }
 
+// openDeleteConfirm stages deleting the selected task behind a confirmation
+// modal. Unlike Plan/Execute there's no Status eligibility check — a task
+// can be deleted no matter what stage it's in, the confirmation itself is
+// the only gate.
+func (m *Model) openDeleteConfirm() {
+	t, ok := m.tasklist.Selected()
+	if !ok {
+		return
+	}
+	m.confirmModalOpen = true
+	m.confirmMessage = fmt.Sprintf("Delete %q? This cannot be undone.", t.Title)
+	m.confirmKind = confirmKindDelete
+	m.confirmTaskID = t.ID
+}
+
 // updateConfirmModal handles input while the confirmation prompt is open:
-// y/enter carries out the staged status change, anything else (n/esc/q)
-// cancels without changing anything.
+// y/enter carries out whatever's staged (a status change or a delete),
+// anything else (n/esc/q) cancels without changing anything.
 func (m Model) updateConfirmModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "enter":
 		m.confirmModalOpen = false
+		if m.confirmKind == confirmKindDelete {
+			m.deleteTask(m.confirmTaskID)
+			return m, nil
+		}
 		if m.confirmTo == domain.StatusPlanning {
 			// Plan is wired to a real run (safe: read-only, no worktree, no
 			// hook server needed). Execute isn't yet — that needs the
@@ -520,6 +558,24 @@ func (m *Model) archiveSelected() {
 			m.persistTask(m.tasks[i])
 		}
 		break
+	}
+	m.refreshTaskList()
+}
+
+// deleteTask removes a task from disk and from the in-memory list.
+// Unconditional by design — the confirmation modal is the only gate, there's
+// no Status restriction like archiveSelected's CanArchive check.
+func (m *Model) deleteTask(id string) {
+	for i, t := range m.tasks {
+		if t.ID == id {
+			m.tasks = append(m.tasks[:i], m.tasks[i+1:]...)
+			break
+		}
+	}
+	if m.store != nil {
+		if err := m.store.DeleteTask(id); err != nil {
+			fmt.Fprintln(os.Stderr, "cormake: failed to delete task", id+":", err)
+		}
 	}
 	m.refreshTaskList()
 }
