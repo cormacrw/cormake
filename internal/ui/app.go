@@ -40,6 +40,11 @@ type Model struct {
 	newTaskModalOpen bool
 	newTaskInput     textinput.Model
 
+	confirmModalOpen bool
+	confirmMessage   string
+	confirmTo        domain.Status
+	confirmFrom      []domain.Status
+
 	workspaceNames map[string]string
 	repoNames      map[string]string
 
@@ -134,6 +139,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateNewTaskModal(msg)
 		}
 
+		if m.confirmModalOpen {
+			return m.updateConfirmModal(msg)
+		}
+
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
@@ -173,11 +182,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.newTaskInput.Focus()
 
 		case key.Matches(msg, keys.Plan):
-			m.advanceSelected(domain.StatusPlanning, domain.StatusTodo)
+			m.openConfirm("Start planning", domain.StatusPlanning, domain.StatusTodo)
 			return m, nil
 
 		case key.Matches(msg, keys.Execute):
-			m.advanceSelected(domain.StatusInProgress, domain.StatusTodo, domain.StatusPlanned)
+			m.openConfirm("Start executing", domain.StatusInProgress, domain.StatusTodo, domain.StatusPlanned)
 			return m, nil
 
 		case key.Matches(msg, keys.Cancel, keys.Help):
@@ -266,6 +275,46 @@ func (m *Model) reloadWorkspaces() {
 	m.workspaceNames = wsNames
 	m.repoNames = repoNames
 	m.refreshTaskList()
+}
+
+// openConfirm stages a Plan/Execute status change behind a confirmation
+// modal — but only if the selected task is actually eligible (in one of
+// allowedFrom); an ineligible task stays a silent no-op, same as before
+// this confirmation step existed.
+func (m *Model) openConfirm(verb string, to domain.Status, allowedFrom ...domain.Status) {
+	t, ok := m.tasklist.Selected()
+	if !ok {
+		return
+	}
+	eligible := false
+	for _, s := range allowedFrom {
+		if t.Status == s {
+			eligible = true
+			break
+		}
+	}
+	if !eligible {
+		return
+	}
+	m.confirmModalOpen = true
+	m.confirmMessage = fmt.Sprintf("%s %q?", verb, t.Title)
+	m.confirmTo = to
+	m.confirmFrom = allowedFrom
+}
+
+// updateConfirmModal handles input while the confirmation prompt is open:
+// y/enter carries out the staged status change, anything else (n/esc/q)
+// cancels without changing anything.
+func (m Model) updateConfirmModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "enter":
+		m.confirmModalOpen = false
+		m.advanceSelected(m.confirmTo, m.confirmFrom...)
+		return m, nil
+	default:
+		m.confirmModalOpen = false
+		return m, nil
+	}
 }
 
 // updateNewTaskModal handles input while the new-task title prompt is open:
@@ -528,6 +577,10 @@ func (m Model) View() string {
 		return m.renderNewTaskModal()
 	}
 
+	if m.confirmModalOpen {
+		return m.renderConfirmModal()
+	}
+
 	top := m.renderTabBar()
 	body := m.renderBody()
 	// MaxWidth, not just Width: Width alone pads short content but wraps
@@ -588,6 +641,17 @@ func (m Model) renderNewTaskModal() string {
 		"New task", "",
 		m.newTaskInput.View(), "",
 		tabInfoStyle.Render("[enter] create   [esc] cancel"),
+	}
+	box := focusedPaneBorderStyle.Padding(1, 3).Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// renderConfirmModal draws the Plan/Execute confirmation prompt, centered
+// over the full screen.
+func (m Model) renderConfirmModal() string {
+	lines := []string{
+		m.confirmMessage, "",
+		tabInfoStyle.Render("[y]es   [n]o"),
 	}
 	box := focusedPaneBorderStyle.Padding(1, 3).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
