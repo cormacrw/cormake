@@ -117,6 +117,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.applyEditorResult(msg)
 		return m, nil
 
+	case fileEditFinishedMsg:
+		m.reloadWorkspaces()
+		return m, nil
+
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
@@ -211,12 +215,57 @@ func (m Model) updateWorkspaceModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "q":
 		m.workspaceModalOpen = false
 		return m, nil
+	case "e":
+		// Manual repo management, for now: hand-edit workspaces.json
+		// directly in an external editor rather than a dedicated form.
+		m.workspaceModalOpen = false
+		if m.store == nil {
+			return m, nil
+		}
+		return m, openFileInEditorCmd(m.store.WorkspacesPath())
 	}
 	if idx, ok := digitIndex(msg.String()); ok && idx < len(m.workspaces) {
 		m.setWorkspace(idx)
 		m.workspaceModalOpen = false
 	}
 	return m, nil
+}
+
+// reloadWorkspaces re-reads workspaces.json after a manual edit (see the
+// workspace modal's "e" action) and rebuilds the name lookup maps. A parse
+// error or an edit that empties the file out entirely is logged and
+// otherwise ignored, leaving the in-memory state as it was — better than
+// bricking the app on a bad hand-edit.
+func (m *Model) reloadWorkspaces() {
+	if m.store == nil {
+		return
+	}
+	workspaces, err := m.store.LoadWorkspaces()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cormake: failed to reload workspaces.json:", err)
+		return
+	}
+	if len(workspaces) == 0 {
+		fmt.Fprintln(os.Stderr, "cormake: workspaces.json has no workspaces, ignoring")
+		return
+	}
+
+	m.workspaces = workspaces
+	if m.activeWS >= len(m.workspaces) {
+		m.activeWS = 0
+	}
+
+	wsNames := make(map[string]string, len(workspaces))
+	repoNames := make(map[string]string)
+	for _, w := range workspaces {
+		wsNames[w.ID] = w.Name
+		for _, r := range w.Repos {
+			repoNames[r.ID] = r.Name
+		}
+	}
+	m.workspaceNames = wsNames
+	m.repoNames = repoNames
+	m.refreshTaskList()
 }
 
 // updateNewTaskModal handles input while the new-task title prompt is open:
@@ -244,19 +293,24 @@ func (m Model) updateNewTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // createTask adds a new TODO task to the active workspace with just a
-// title — everything else (description, repo, ...) gets filled in later
-// via the [enter] edit-in-editor flow.
+// title, defaulting to the workspace's first repo if it has one (there's
+// no repo picker yet). The description gets filled in later via the
+// [enter] edit-in-editor flow.
 func (m *Model) createTask(title string) {
 	if len(m.workspaces) == 0 {
 		return
 	}
+	ws := m.workspaces[m.activeWS]
 	t := domain.Task{
 		ID:          uuid.NewString(),
-		WorkspaceID: m.workspaces[m.activeWS].ID,
+		WorkspaceID: ws.ID,
 		Title:       title,
 		Status:      domain.StatusTodo,
 		Source:      "manual",
 		CreatedAt:   time.Now(),
+	}
+	if len(ws.Repos) > 0 {
+		t.RepoID = ws.Repos[0].ID
 	}
 	m.tasks = append(m.tasks, t)
 	m.persistTask(t)
@@ -521,7 +575,7 @@ func (m Model) renderWorkspaceModal() string {
 		}
 		lines = append(lines, marker+name)
 	}
-	lines = append(lines, "", tabInfoStyle.Render("[enter] select   [esc] cancel"))
+	lines = append(lines, "", tabInfoStyle.Render("[enter] select   [e]dit repos   [esc] cancel"))
 
 	box := focusedPaneBorderStyle.Padding(1, 3).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)

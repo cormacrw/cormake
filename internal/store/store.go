@@ -32,6 +32,12 @@ func (s *Store) workspacesPath() string {
 	return filepath.Join(s.dir, "workspaces.json")
 }
 
+// WorkspacesPath exposes the on-disk path to workspaces.json so callers can
+// open it directly (e.g. in an external editor for manual repo management).
+func (s *Store) WorkspacesPath() string {
+	return s.workspacesPath()
+}
+
 func (s *Store) taskPath(id string) string {
 	return filepath.Join(s.dir, "tasks", id+".json")
 }

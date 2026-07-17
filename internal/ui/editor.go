@@ -74,3 +74,20 @@ func openInEditorCmd(t domain.Task) tea.Cmd {
 		return editorFinishedMsg{taskID: t.ID, path: path, err: err}
 	})
 }
+
+// fileEditFinishedMsg reports the outcome of an external-editor session
+// started by openFileInEditorCmd — editing an existing file directly, with
+// no temp file and nothing to parse back.
+type fileEditFinishedMsg struct {
+	path string
+	err  error
+}
+
+// openFileInEditorCmd suspends the TUI to edit an existing file in place
+// (e.g. workspaces.json, for manual repo management) via tea.ExecProcess.
+func openFileInEditorCmd(path string) tea.Cmd {
+	cmd := exec.Command(editorCommand(), path)
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		return fileEditFinishedMsg{path: path, err: err}
+	})
+}
