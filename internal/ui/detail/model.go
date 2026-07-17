@@ -15,15 +15,19 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"cormake/internal/domain"
+	"cormake/internal/ui/theme"
 )
 
 var (
 	titleStyle       = lipgloss.NewStyle().Bold(true)
 	metaStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 	dividerStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	activeTabStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
 	inactiveTabStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 )
+
+func activeTabStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(theme.Accent()).Bold(true)
+}
 
 // Tab is which content the pane's single scrollable area is showing.
 type Tab int
@@ -269,7 +273,7 @@ func (m Model) renderTabBar() string {
 	for i, t := range tabs {
 		label := tabLabel(t)
 		if t == m.activeTab {
-			rendered[i] = activeTabStyle.Render("[" + label + "]")
+			rendered[i] = activeTabStyle().Render("[" + label + "]")
 		} else {
 			rendered[i] = inactiveTabStyle.Render(" " + label + " ")
 		}

@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"cormake/internal/agent"
+	"cormake/internal/ui/theme"
 )
 
 // Log line styles, one per kind of thing that shows up in a task's Log tab.
@@ -21,8 +22,11 @@ var (
 	logToolResultStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	logResultStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
 	logErrorStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
-	logCormakeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("212"))
 )
+
+func logCormakeStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(theme.Accent())
+}
 
 // Long tool_result blobs (a full file's contents, a huge `ls -la`, ...)
 // would otherwise flood the log with more text than anyone reads; these cap
@@ -77,7 +81,7 @@ func formatAgentLogLine(ev agent.Event) string {
 // elsewhere in the app, so it reads as "the app talking" rather than another
 // tool_result.
 func logCormakeLine(msg string) string {
-	return logCormakeStyle.Render("cormake: " + msg)
+	return logCormakeStyle().Render("cormake: " + msg)
 }
 
 // describeToolUse renders a tool_use call the way a human would want to

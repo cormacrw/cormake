@@ -25,6 +25,7 @@ import (
 	"cormake/internal/store"
 	"cormake/internal/ui/detail"
 	"cormake/internal/ui/tasklist"
+	"cormake/internal/ui/theme"
 )
 
 const (
@@ -1184,6 +1185,7 @@ func (m *Model) refreshTaskList() {
 	if len(m.workspaces) == 0 {
 		return
 	}
+	theme.SetAccent(m.workspaces[m.activeWS].PrimaryColor)
 	activeID := m.workspaces[m.activeWS].ID
 	filtered := make([]domain.Task, 0, len(m.tasks))
 	for _, t := range m.tasks {
@@ -1303,11 +1305,11 @@ func (m Model) View() string {
 func (m Model) renderTabBar() string {
 	open, archived := " Open ", " Archived "
 	if !m.showArchive {
-		open = activeTabStyle.Render("[Open]")
+		open = activeTabStyle().Render("[Open]")
 		archived = inactiveTabStyle.Render(archived)
 	} else {
 		open = inactiveTabStyle.Render(open)
-		archived = activeTabStyle.Render("[Archived]")
+		archived = activeTabStyle().Render("[Archived]")
 	}
 	tabs := " " + open + "  " + archived
 
@@ -1330,14 +1332,24 @@ func (m Model) renderWorkspaceModal() string {
 		name := w.Name
 		if i == m.workspaceCursor {
 			marker = "▸ "
-			name = activeTabStyle.Render(name)
+			name = activeTabStyle().Render(name)
 		}
-		lines = append(lines, marker+name)
+		swatch := lipgloss.NewStyle().Foreground(lipgloss.Color(swatchColor(w.PrimaryColor))).Render("■")
+		lines = append(lines, marker+swatch+" "+name)
 	}
-	lines = append(lines, "", tabInfoStyle.Render("[enter] select   [e]dit repos   [esc] cancel"))
+	lines = append(lines, "", tabInfoStyle.Render("[enter] select   [e]dit repos/color   [esc] cancel"))
 
-	box := focusedPaneBorderStyle.Padding(1, 3).Render(strings.Join(lines, "\n"))
+	box := focusedPaneBorderStyle().Padding(1, 3).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// swatchColor mirrors theme.SetAccent's empty-string fallback so an
+// unset PrimaryColor previews as today's default pink rather than black.
+func swatchColor(c string) string {
+	if c == "" {
+		return theme.DefaultAccent
+	}
+	return c
 }
 
 // renderNewTaskModal draws the new-task title prompt, centered over the
@@ -1348,7 +1360,7 @@ func (m Model) renderNewTaskModal() string {
 		m.newTaskInput.View(), "",
 		tabInfoStyle.Render("[enter] create   [esc] cancel"),
 	}
-	box := focusedPaneBorderStyle.Padding(1, 3).Render(strings.Join(lines, "\n"))
+	box := focusedPaneBorderStyle().Padding(1, 3).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
@@ -1361,7 +1373,7 @@ func (m Model) renderCompleteModal() string {
 		m.completeInput.View(), "",
 		tabInfoStyle.Render("[enter] complete   [esc] cancel"),
 	}
-	box := focusedPaneBorderStyle.Padding(1, 3).Render(strings.Join(lines, "\n"))
+	box := focusedPaneBorderStyle().Padding(1, 3).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
@@ -1372,12 +1384,12 @@ func (m Model) renderConfirmModal() string {
 		m.confirmMessage, "",
 		tabInfoStyle.Render("[y]es   [n]o"),
 	}
-	box := focusedPaneBorderStyle.Padding(1, 3).Render(strings.Join(lines, "\n"))
+	box := focusedPaneBorderStyle().Padding(1, 3).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 func (m Model) renderBody() string {
-	leftStyle := focusedPaneBorderStyle
+	leftStyle := focusedPaneBorderStyle()
 	rightStyle := paneBorderStyle
 
 	leftTotal, rightTotal, contentHeight := m.paneDims()

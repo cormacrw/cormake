@@ -7,12 +7,15 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"cormake/internal/ui/theme"
 )
 
-var (
-	selectedRowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
-	plainRowStyle    = lipgloss.NewStyle()
-)
+var plainRowStyle = lipgloss.NewStyle()
+
+func selectedRowStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(theme.Accent()).Bold(true)
+}
 
 // Delegate renders each task as a single compact line: "<marker><title>" on
 // the left, its status glyph right-aligned (full stage name is left for the
@@ -46,7 +49,7 @@ func (d Delegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
 
 	line := marker + title + repeatSpace(gap) + glyph
 	if index == m.Index() {
-		line = selectedRowStyle.Render(line)
+		line = selectedRowStyle().Render(line)
 	} else {
 		line = plainRowStyle.Render(line)
 	}

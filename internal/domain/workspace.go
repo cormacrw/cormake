@@ -10,9 +10,10 @@ type Repo struct {
 }
 
 type Workspace struct {
-	ID        string
-	Name      string
-	Repos     []Repo
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID           string
+	Name         string
+	Repos        []Repo
+	PrimaryColor string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
