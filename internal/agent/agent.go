@@ -83,6 +83,7 @@ type Event struct {
 	ResultText string
 	CostUSD    float64
 	SessionID  string
+	Cwd        string // set on EventInit; the process's actual working directory (a worktree path, for Complete-mode runs)
 
 	Err error
 }

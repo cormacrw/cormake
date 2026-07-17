@@ -51,6 +51,25 @@ type Task struct {
 	SessionID    string
 	WorktreeName string
 
+	// WorktreePath is the worktree's actual absolute path on disk, reported
+	// back by claude itself (its system/init "cwd") rather than assumed from
+	// WorktreeName — claude owns creating the worktree (see -w/--worktree),
+	// cormake just observes where it landed.
+	WorktreePath string
+
+	// WorktreeBaseRef is the repo's HEAD commit at the moment the worktree
+	// was created — the base a code review diff should compare against.
+	// Captured directly rather than assumed (e.g. "master") since the
+	// worktree's branch name and the repo's default branch name are
+	// independent of each other.
+	WorktreeBaseRef string
+
+	// Branch is the feature branch the task's work landed on once marked
+	// complete (see the Complete-task flow) — the worktree's own branch,
+	// renamed to whatever name was given in the complete modal, then left
+	// behind in the repo after the worktree itself is removed.
+	Branch string
+
 	// PlanFilePath points at the plan claude wrote during a plan-mode run.
 	// claude's plan-mode has a built-in, hardcoded allowance to write to
 	// ~/.claude/plans/ (confirmed directly — it ignores any other path

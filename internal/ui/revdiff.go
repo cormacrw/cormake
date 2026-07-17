@@ -9,11 +9,23 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// reviewKind distinguishes what a revdiff session was reviewing, so
+// handleRevdiffFinished knows how to act on the resulting annotations —
+// revise a plan (resuming a Plan-mode session) or address code-review
+// feedback (resuming a Complete-mode session in its worktree).
+type reviewKind int
+
+const (
+	reviewKindPlan reviewKind = iota
+	reviewKindExecute
+)
+
 // revdiffFinishedMsg reports the outcome of a revdiff annotation session.
 // Annotations is empty when the user quit without adding any (a clean,
 // nothing-to-do outcome, not an error).
 type revdiffFinishedMsg struct {
 	taskID      string
+	kind        reviewKind
 	annotations string
 	err         error
 }
@@ -72,6 +84,51 @@ func openRevdiffCmd(taskID, planText string) tea.Cmd {
 	})
 }
 
+// openRevdiffDiffCmd suspends the TUI to let the user review an execute-mode
+// task's actual code changes in revdiff — the worktree's working tree
+// (including untracked new files, via --untracked) diffed against baseRef,
+// the repo's HEAD at the moment the worktree was created. Unlike
+// openRevdiffCmd (a plan reviewed as a stdin scratch buffer), this points
+// revdiff straight at the worktree's real git state; no stdin involved, so
+// Stdin is left nil like Stdout/Stderr, same tty-wiring reasoning as above.
+func openRevdiffDiffCmd(taskID, worktreePath, baseRef string) tea.Cmd {
+	outFile, err := os.CreateTemp("", "cormake-diff-annotations-*.md")
+	if err != nil {
+		return func() tea.Msg { return revdiffFinishedMsg{taskID: taskID, kind: reviewKindExecute, err: err} }
+	}
+	outPath := outFile.Name()
+	outFile.Close()
+
+	args := []string{"--untracked", "-o", outPath, "--exit-code-on-annotations"}
+	if baseRef != "" {
+		args = append(args, baseRef)
+	}
+	cmd := exec.Command("revdiff", args...)
+	cmd.Dir = worktreePath
+
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		defer os.Remove(outPath)
+
+		var exitErr *exec.ExitError
+		hasAnnotations := errors.As(err, &exitErr) && exitErr.ExitCode() == 10
+		if hasAnnotations {
+			err = nil
+		}
+		if err != nil {
+			return revdiffFinishedMsg{taskID: taskID, kind: reviewKindExecute, err: err}
+		}
+		if !hasAnnotations {
+			return revdiffFinishedMsg{taskID: taskID, kind: reviewKindExecute}
+		}
+
+		data, readErr := os.ReadFile(outPath)
+		if readErr != nil {
+			return revdiffFinishedMsg{taskID: taskID, kind: reviewKindExecute, err: readErr}
+		}
+		return revdiffFinishedMsg{taskID: taskID, kind: reviewKindExecute, annotations: strings.TrimSpace(string(data))}
+	})
+}
+
 // buildRevisePrompt turns raw revdiff annotation output (format: "##
 // <label>:<line>" followed by the note on the next line, one block per
 // annotation) into a follow-up prompt asking claude to revise its plan.
@@ -80,4 +137,14 @@ func buildRevisePrompt(annotations string) string {
 		"(each is a \"## <label>:<line>\" heading followed by the note):\n\n" +
 		annotations +
 		"\n\nPlease revise the plan to address this feedback."
+}
+
+// buildExecuteRevisePrompt turns revdiff annotations left on the actual code
+// diff into a follow-up prompt asking claude to address them with further
+// changes in the same session/worktree.
+func buildExecuteRevisePrompt(annotations string) string {
+	return "Here is feedback on the code changes you just made, as inline review annotations " +
+		"(each is a \"## <label>:<line>\" heading followed by the note):\n\n" +
+		annotations +
+		"\n\nPlease address this feedback with further changes."
 }

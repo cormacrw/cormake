@@ -19,6 +19,7 @@ type rawEnvelope struct {
 type rawSystemInit struct {
 	SessionID string `json:"session_id"`
 	Model     string `json:"model"`
+	Cwd       string `json:"cwd"`
 }
 
 type rawMessageLine struct {
@@ -75,6 +76,7 @@ func translateLine(taskID string, line []byte) []agent.Event {
 			Type:      agent.EventInit,
 			SessionID: init.SessionID,
 			Text:      init.Model,
+			Cwd:       init.Cwd,
 		}}
 
 	case "assistant", "user":

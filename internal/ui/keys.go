@@ -13,8 +13,9 @@ type KeyMap struct {
 	PgDown key.Binding
 	Quit   key.Binding
 
-	// Archive sets the selected task's Status to Complete, from any stage —
-	// you can always archive a task, whatever it's doing.
+	// Archive parks a TODO or READY_FOR_REVIEW task out of the active view
+	// (or restores one already archived) — not a finished outcome, just set
+	// aside. See Complete below for actually finishing a task's work.
 	Archive key.Binding
 
 	// Delete permanently removes the selected task, from any stage, behind
@@ -22,19 +23,26 @@ type KeyMap struct {
 	// eligibility check — delete works no matter what stage the task is in).
 	Delete key.Binding
 
+	// Complete finalizes a READY_FOR_REVIEW task that's been executed:
+	// prompts for a feature branch name, commits the worktree's outstanding
+	// changes onto it, removes the worktree, and moves the task to COMPLETE.
+	Complete key.Binding
+
 	Open       key.Binding // enters edit mode for the selected task's title/body
 	Workspaces key.Binding // opens the workspace-picker modal
 
-	// Plan/Execute only act on a TODO task: Plan moves it to PLANNING,
-	// Execute skips planning and moves it straight to IN_PROGRESS. Neither
-	// spawns a real agent yet — this just advances Status for now, and both
+	// Plan spawns a read-only claude run (TODO -> PLANNING -> PLANNED).
+	// Execute spawns a real claude run with edits enabled, inside a fresh
+	// git worktree (TODO/PLANNED -> IN_PROGRESS -> READY_FOR_REVIEW). Both
 	// are staged behind a confirmation modal.
 	Plan    key.Binding
 	Execute key.Binding
 
-	// Review opens the selected task's plan in revdiff for annotation, if
-	// it has one; annotations get sent back to claude as revision feedback
-	// automatically once revdiff exits.
+	// Review opens the selected task's artifact in revdiff for annotation:
+	// its actual code changes (diffed against the worktree's base ref) once
+	// it's been executed, otherwise its plan if it has one. Annotations get
+	// sent back to claude as revision feedback automatically once revdiff
+	// exits, resuming whichever session (plan or execute) produced them.
 	Review key.Binding
 
 	// Switch which tab the detail pane's content area shows. 1/2/3 are fixed
@@ -61,8 +69,9 @@ var keys = KeyMap{
 	PgDown: key.NewBinding(key.WithKeys("pgdown", "ctrl+d")),
 	Quit:   key.NewBinding(key.WithKeys("q")),
 
-	Archive: key.NewBinding(key.WithKeys("a")),
-	Delete:  key.NewBinding(key.WithKeys("d")),
+	Archive:  key.NewBinding(key.WithKeys("a")),
+	Delete:   key.NewBinding(key.WithKeys("d")),
+	Complete: key.NewBinding(key.WithKeys("m")),
 
 	Open:       key.NewBinding(key.WithKeys("enter")),
 	Workspaces: key.NewBinding(key.WithKeys("w")),
@@ -82,4 +91,4 @@ var keys = KeyMap{
 	Help:    key.NewBinding(key.WithKeys("?")),
 }
 
-const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [r]eview [a]rchive [d]elete [w]orkspaces tabs:1-3/[/] [?]help [q]uit"
+const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [r]eview [m]ark complete [a]rchive [d]elete [w]orkspaces tabs:1-3/[/] [?]help [q]uit"

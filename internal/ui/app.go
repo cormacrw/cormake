@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -44,6 +45,10 @@ type Model struct {
 
 	newTaskModalOpen bool
 	newTaskInput     textinput.Model
+
+	completeModalOpen bool
+	completeInput     textinput.Model
+	completeTaskID    string
 
 	confirmModalOpen bool
 	confirmMessage   string
@@ -113,17 +118,23 @@ func New(st *store.Store) (Model, error) {
 	ti.CharLimit = 200
 	ti.Width = 40
 
+	ci := textinput.New()
+	ci.Placeholder = "feature branch name"
+	ci.CharLimit = 200
+	ci.Width = 40
+
 	m := Model{
-		store:        st,
-		workspaces:   workspaces,
-		tasks:        tasks,
-		repoNames:    repoNames,
-		tasklist:     tasklist.New(nil),
-		detail:       detail.New(map[string][]string{}),
-		newTaskInput: ti,
-		runner:       claude.Client{},
-		eventsCh:     make(chan tea.Msg, 64),
-		active:       make(map[string]func()),
+		store:         st,
+		workspaces:    workspaces,
+		tasks:         tasks,
+		repoNames:     repoNames,
+		tasklist:      tasklist.New(nil),
+		detail:        detail.New(map[string][]string{}),
+		newTaskInput:  ti,
+		completeInput: ci,
+		runner:        claude.Client{},
+		eventsCh:      make(chan tea.Msg, 64),
+		active:        make(map[string]func()),
 	}
 	m.refreshTaskList()
 	return m, nil
@@ -160,6 +171,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.handleRevdiffFinished(msg)
 		return m, cmd
 
+	case completeFinishedMsg:
+		m.handleCompleteFinished(msg)
+		return m, nil
+
 	case agentEventMsg:
 		m.handleAgentEvent(msg.Event)
 		return m, waitForEvent(m.eventsCh)
@@ -179,6 +194,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if m.newTaskModalOpen {
 			return m.updateNewTaskModal(msg)
+		}
+
+		if m.completeModalOpen {
+			return m.updateCompleteModal(msg)
 		}
 
 		if m.confirmModalOpen {
@@ -211,6 +230,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openDeleteConfirm()
 			return m, nil
 
+		case key.Matches(msg, keys.Complete):
+			m.openCompleteModal()
+			if m.completeModalOpen {
+				return m, m.completeInput.Focus()
+			}
+			return m, nil
+
 		case key.Matches(msg, keys.Open):
 			if t, ok := m.tasklist.Selected(); ok {
 				return m, openInEditorCmd(t)
@@ -237,6 +263,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keys.Review):
 			if t, ok := m.tasklist.Selected(); ok {
+				// Once a task has been executed, review the actual code
+				// changes rather than the plan that preceded it — the diff
+				// is the more concrete, more current artifact.
+				if t.WorktreePath != "" {
+					return m, openRevdiffDiffCmd(t.ID, t.WorktreePath, t.WorktreeBaseRef)
+				}
 				if plan := m.readPlanFile(t); plan != "" {
 					return m, openRevdiffCmd(t.ID, plan)
 				}
@@ -401,6 +433,124 @@ func (m *Model) openDeleteConfirm() {
 	m.confirmTaskID = t.ID
 }
 
+// openCompleteModal stages finalizing the selected task — only eligible once
+// it's actually been executed (has a worktree) and is ready for review — and
+// prompts for the feature branch name the committed work should land on.
+func (m *Model) openCompleteModal() {
+	t, ok := m.tasklist.Selected()
+	if !ok || t.Status != domain.StatusReadyForReview || t.WorktreePath == "" {
+		return
+	}
+	m.completeTaskID = t.ID
+	m.completeInput.SetValue(suggestBranchName(t))
+	m.completeInput.CursorEnd()
+	m.completeModalOpen = true
+}
+
+// updateCompleteModal handles input while the branch-name prompt is open:
+// enter commits the worktree's changes onto the given branch and removes
+// the worktree (see complete.go), esc cancels without touching anything.
+func (m Model) updateCompleteModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.completeModalOpen = false
+		m.completeInput.Blur()
+		return m, nil
+	case "enter":
+		branch := strings.TrimSpace(m.completeInput.Value())
+		m.completeModalOpen = false
+		m.completeInput.Blur()
+		if branch == "" {
+			return m, nil
+		}
+		cmd := m.startCompleteTask(branch)
+		return m, cmd
+	}
+	var cmd tea.Cmd
+	m.completeInput, cmd = m.completeInput.Update(msg)
+	return m, cmd
+}
+
+// startCompleteTask kicks off finalizing the task openCompleteModal staged
+// (by ID, not the current selection — the modal blocks all other input so
+// it can't have changed, but this matches openDeleteConfirm's pattern of
+// resolving the target once, up front).
+func (m *Model) startCompleteTask(branch string) tea.Cmd {
+	var target domain.Task
+	found := false
+	for _, t := range m.tasks {
+		if t.ID == m.completeTaskID {
+			target = t
+			found = true
+			break
+		}
+	}
+	if !found || target.WorktreePath == "" {
+		return nil
+	}
+	repoPath, ok := m.repoPath(target.RepoID)
+	if !ok || repoPath == "" {
+		m.detail.AppendLogLine(target.ID, "cormake: cannot complete — task has no repo assigned")
+		return nil
+	}
+	m.detail.AppendLogLine(target.ID, "cormake: finalizing onto branch "+branch)
+	return completeTaskCmd(target.ID, repoPath, target.WorktreePath, branch, "cormake: "+target.Title)
+}
+
+// handleCompleteFinished reacts to a finalize sequence ending: success moves
+// the task to Complete and records the branch it landed on, clearing
+// WorktreePath since that directory no longer exists (also keeps Review
+// from later trying to diff-review a worktree that's gone); a failure is
+// just logged, leaving the task exactly as it was — ReadyForReview with its
+// worktree intact — so nothing is lost and completing can be retried.
+func (m *Model) handleCompleteFinished(msg completeFinishedMsg) {
+	if msg.err != nil {
+		m.detail.AppendLogLine(msg.taskID, "cormake: failed to complete: "+msg.err.Error())
+		return
+	}
+	for i := range m.tasks {
+		if m.tasks[i].ID != msg.taskID {
+			continue
+		}
+		m.tasks[i].Status = domain.StatusComplete
+		m.tasks[i].Branch = msg.branch
+		m.tasks[i].WorktreePath = ""
+		m.persistTask(m.tasks[i])
+		break
+	}
+	m.refreshTaskList()
+	m.syncDetail()
+}
+
+// suggestBranchName derives a starting-point feature-branch name from a
+// task's title — lowercased, non-alphanumeric runs collapsed to a single
+// "-". Just a default shown in the complete modal's input; the user can
+// freely edit it before confirming.
+func suggestBranchName(t domain.Task) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range strings.ToLower(t.Title) {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		default:
+			if !lastDash && b.Len() > 0 {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	name := strings.TrimRight(b.String(), "-")
+	if name == "" {
+		name = shortTaskID(t.ID)
+	}
+	if len(name) > 50 {
+		name = strings.TrimRight(name[:50], "-")
+	}
+	return "feature/" + name
+}
+
 // updateConfirmModal handles input while the confirmation prompt is open:
 // y/enter carries out whatever's staged (a status change or a delete),
 // anything else (n/esc/q) cancels without changing anything.
@@ -413,11 +563,11 @@ func (m Model) updateConfirmModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.confirmTo == domain.StatusPlanning {
-			// Plan is wired to a real run (safe: read-only, no worktree, no
-			// hook server needed). Execute isn't yet — that needs the
-			// permission-hook server first, or a real run would just hang
-			// the first time it hits anything outside acceptEdits.
 			cmd := m.startPlanRun()
+			return m, cmd
+		}
+		if m.confirmTo == domain.StatusInProgress {
+			cmd := m.startExecuteRun()
 			return m, cmd
 		}
 		m.advanceSelected(m.confirmTo, m.confirmFrom...)
@@ -669,12 +819,113 @@ func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.
 	return nil
 }
 
+// startExecuteRun spawns a fresh real claude Complete-mode run for the
+// selected task. Eligibility (TODO/PLANNED) was already checked once in
+// openConfirm before the confirmation modal appeared.
+func (m *Model) startExecuteRun() tea.Cmd {
+	t, ok := m.tasklist.Selected()
+	if !ok {
+		return nil
+	}
+	return m.runExecuteAgent(t, buildExecutePrompt(t), "")
+}
+
+// runExecuteAgent spawns a Complete-mode claude run for t with the given
+// prompt, shared by the initial Execute action and the
+// revise-after-code-review flow (see revdiff.go). resumeSessionID, when
+// non-empty, continues t's existing session instead of starting a fresh
+// one — and deliberately does NOT pass WorktreeName again: claude re-enters
+// the same worktree on its own from --resume alone (verified directly), and
+// re-requesting a worktree with a name that already exists would be wrong
+// anyway. A fresh run creates a new worktree (see agent.RunSpec.WorktreeName
+// / claude/args.go) so the agent's edits land on a disposable
+// branch/directory rather than the actual checkout, and records the repo's
+// current HEAD as WorktreeBaseRef — the base a later diff review compares
+// against.
+func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) tea.Cmd {
+	repoPath, ok := m.repoPath(t.RepoID)
+	if !ok || repoPath == "" {
+		m.detail.AppendLogLine(t.ID, "cormake: cannot start — task has no repo assigned")
+		return nil
+	}
+
+	spec := agent.RunSpec{
+		TaskID:          t.ID,
+		Prompt:          prompt,
+		RepoPath:        repoPath,
+		Mode:            agent.RunModeComplete,
+		ResumeSessionID: resumeSessionID,
+	}
+
+	sessionID := resumeSessionID
+	wtName := t.WorktreeName
+	baseRef := t.WorktreeBaseRef
+	if sessionID == "" {
+		sessionID = uuid.NewString()
+		spec.SessionID = sessionID
+		wtName = worktreeName(t.ID)
+		spec.WorktreeName = wtName
+		baseRef = gitHeadRef(repoPath)
+	}
+
+	handle, err := m.runner.Start(context.Background(), spec)
+	if err != nil {
+		m.detail.AppendLogLine(t.ID, "cormake: failed to start: "+err.Error())
+		return nil
+	}
+
+	for i := range m.tasks {
+		if m.tasks[i].ID == t.ID {
+			m.tasks[i].Status = domain.StatusInProgress
+			m.tasks[i].SessionID = sessionID
+			m.tasks[i].WorktreeName = wtName
+			m.tasks[i].WorktreeBaseRef = baseRef
+			m.persistTask(m.tasks[i])
+			break
+		}
+	}
+	m.refreshTaskList()
+
+	m.active[t.ID] = handle.Cancel
+	go forwardEvents(m.eventsCh, t.ID, handle)
+
+	return nil
+}
+
+// gitHeadRef resolves repoPath's current HEAD commit — best-effort, since
+// this is only used to pin a review's diff base; a failure just means a
+// later Review falls back to whatever revdiff defaults to without a
+// baseRef, same degrade as "no repo assigned" already gets elsewhere.
+func gitHeadRef(repoPath string) string {
+	out, err := exec.Command("git", "-C", repoPath, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// worktreeName derives a short, git-branch-safe worktree name from a task's
+// ID, e.g. "task-a1b2c3d4".
+func worktreeName(taskID string) string {
+	return "task-" + shortTaskID(taskID)
+}
+
+// shortTaskID returns a task ID's UUID first segment (8 hex chars) — short
+// enough to use in generated branch/worktree names.
+func shortTaskID(id string) string {
+	if i := strings.IndexByte(id, '-'); i > 0 {
+		return id[:i]
+	}
+	return id
+}
+
 // handleRevdiffFinished reacts to a revdiff annotation session ending: a
 // failure gets logged, a clean quit with no annotations is a silent no-op,
 // and actual annotations kick off a revise run — resuming the task's
-// existing session so claude has the original plan in context — with no
-// separate confirmation step, since this reads as one continuous action
-// (annotate, quit, feedback sent) rather than two.
+// existing session (plan or execute, per msg.kind) so claude has full
+// context of what it already did — with no separate confirmation step,
+// since this reads as one continuous action (annotate, quit, feedback sent)
+// rather than two.
 func (m *Model) handleRevdiffFinished(msg revdiffFinishedMsg) tea.Cmd {
 	if msg.err != nil {
 		m.detail.AppendLogLine(msg.taskID, "cormake: revdiff failed: "+msg.err.Error())
@@ -689,6 +940,9 @@ func (m *Model) handleRevdiffFinished(msg revdiffFinishedMsg) tea.Cmd {
 			continue
 		}
 		m.detail.AppendLogLine(t.ID, "cormake: sending review feedback to claude for revision")
+		if msg.kind == reviewKindExecute {
+			return m.runExecuteAgent(t, buildExecuteRevisePrompt(msg.annotations), t.SessionID)
+		}
 		return m.runPlanAgent(t, buildRevisePrompt(msg.annotations), t.SessionID)
 	}
 	return nil
@@ -744,6 +998,23 @@ func buildPrompt(t domain.Task) string {
 	return "Investigate the following task and write up a plan for how to approach it:\n\n" + task
 }
 
+// buildExecutePrompt turns a task's title/description (and its plan, if it
+// has one) into the prompt sent to claude for a real Complete-mode run.
+// Unlike buildPrompt, this asks for the work to actually be implemented —
+// Complete mode runs with edits enabled in a disposable worktree, so there's
+// no reason to hold back.
+func buildExecutePrompt(t domain.Task) string {
+	task := t.Title
+	if strings.TrimSpace(t.Description) != "" {
+		task += "\n\n" + t.Description
+	}
+	prompt := "Implement the following task — make the necessary code changes to complete it:\n\n" + task
+	if t.PlanFilePath != "" {
+		prompt += fmt.Sprintf("\n\nA plan for this task was written earlier at %s — read it first and follow it.", t.PlanFilePath)
+	}
+	return prompt
+}
+
 // forwardEvents drains a running task's event channel onto the shared
 // eventsCh as tea.Msgs, then reports completion. It's a free function, not
 // a Model method, deliberately: bubbletea's Update returns a fresh Model
@@ -765,6 +1036,20 @@ func (m *Model) handleAgentEvent(ev agent.Event) {
 	switch ev.Type {
 	case agent.EventInit:
 		m.detail.AppendLogLine(ev.TaskID, fmt.Sprintf("[init] model=%s", ev.Text))
+		// Only Complete-mode runs set WorktreeName before spawning (see
+		// startExecuteRun) — a Plan run's cwd is just the repo itself, not
+		// worth recording as a "worktree path".
+		if ev.Cwd != "" {
+			for i := range m.tasks {
+				if m.tasks[i].ID != ev.TaskID {
+					continue
+				}
+				if m.tasks[i].WorktreeName != "" {
+					m.tasks[i].WorktreePath = ev.Cwd
+				}
+				break
+			}
+		}
 	case agent.EventText:
 		prefix := "assistant"
 		if ev.IsSubagent {
@@ -845,10 +1130,12 @@ func (m *Model) setPlanFilePath(taskID, path string) {
 }
 
 // handleTaskFinished reacts to the running process actually exiting: a
-// successful plan run moves Planning -> Planned; a non-zero exit moves it
-// to Failed. Note this doesn't yet distinguish "genuinely failed" from
-// "user cancelled" (both look like a non-nil Wait() error) since there's no
-// way to trigger Cancel from the UI yet — that's the next piece.
+// successful plan run moves Planning -> Planned, a successful execute run
+// moves InProgress -> ReadyForReview, and any non-zero exit moves it to
+// Failed regardless of which kind of run it was. Note this doesn't yet
+// distinguish "genuinely failed" from "user cancelled" (both look like a
+// non-nil Wait() error) since there's no way to trigger Cancel from the UI
+// yet — that's the next piece.
 func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 	delete(m.active, msg.TaskID)
 	for i := range m.tasks {
@@ -860,6 +1147,8 @@ func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 			m.tasks[i].ErrorMessage = msg.Err.Error()
 		} else if m.tasks[i].Status == domain.StatusPlanning {
 			m.tasks[i].Status = domain.StatusPlanned
+		} else if m.tasks[i].Status == domain.StatusInProgress {
+			m.tasks[i].Status = domain.StatusReadyForReview
 		}
 		m.persistTask(m.tasks[i])
 		break
@@ -980,6 +1269,10 @@ func (m Model) View() string {
 		return m.renderNewTaskModal()
 	}
 
+	if m.completeModalOpen {
+		return m.renderCompleteModal()
+	}
+
 	if m.confirmModalOpen {
 		return m.renderConfirmModal()
 	}
@@ -1047,6 +1340,19 @@ func (m Model) renderNewTaskModal() string {
 		"New task", "",
 		m.newTaskInput.View(), "",
 		tabInfoStyle.Render("[enter] create   [esc] cancel"),
+	}
+	box := focusedPaneBorderStyle.Padding(1, 3).Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// renderCompleteModal draws the mark-complete branch-name prompt, centered
+// over the full screen.
+func (m Model) renderCompleteModal() string {
+	lines := []string{
+		"Mark task complete", "",
+		"Commit changes and finalize onto branch:", "",
+		m.completeInput.View(), "",
+		tabInfoStyle.Render("[enter] complete   [esc] cancel"),
 	}
 	box := focusedPaneBorderStyle.Padding(1, 3).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)

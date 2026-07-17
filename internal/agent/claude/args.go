@@ -26,6 +26,13 @@ func BuildArgs(spec agent.RunSpec) []string {
 	case agent.RunModePlan:
 		args = append(args, "--permission-mode", "plan")
 	case agent.RunModeComplete:
+		// bypassPermissions is required for a headless (-p) run to make any
+		// real progress: any tool needing a permission prompt would just
+		// hang forever otherwise, since there's no TTY to answer it (verified
+		// directly — acceptEdits alone stalls the first time it needs Bash).
+		// The worktree (-w) is what makes that acceptable: real edits, but
+		// on a disposable branch/directory instead of the actual checkout.
+		args = append(args, "--permission-mode", "bypassPermissions")
 		if spec.WorktreeName != "" {
 			args = append(args, "-w", spec.WorktreeName)
 		}
