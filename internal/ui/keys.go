@@ -45,11 +45,13 @@ type KeyMap struct {
 	// exits, resuming whichever session (plan or execute) produced them.
 	Review key.Binding
 
-	// Switch which tab the detail pane's content area shows. 1/2/3 are fixed
-	// slots regardless of whether Plan is applicable, so they don't shift
+	// Switch which tab the detail pane's content area shows. 1/2/3/4 are
+	// fixed slots (Description/Plan/Summary/Log) regardless of whether
+	// Plan/Summary is applicable to the current task, so they don't shift
 	// task to task; [ and ] cycle through whichever tabs are visible.
 	TabDescription key.Binding
 	TabPlan        key.Binding
+	TabSummary     key.Binding
 	TabLog         key.Binding
 	TabPrev        key.Binding
 	TabNext        key.Binding
@@ -82,7 +84,8 @@ var keys = KeyMap{
 
 	TabDescription: key.NewBinding(key.WithKeys("1")),
 	TabPlan:        key.NewBinding(key.WithKeys("2")),
-	TabLog:         key.NewBinding(key.WithKeys("3")),
+	TabSummary:     key.NewBinding(key.WithKeys("3")),
+	TabLog:         key.NewBinding(key.WithKeys("4")),
 	TabPrev:        key.NewBinding(key.WithKeys("[")),
 	TabNext:        key.NewBinding(key.WithKeys("]")),
 
@@ -91,4 +94,4 @@ var keys = KeyMap{
 	Help:    key.NewBinding(key.WithKeys("?")),
 }
 
-const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [r]eview [m]ark complete [a]rchive [d]elete [w]orkspaces tabs:1-3/[/] [?]help [q]uit"
+const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [r]eview [m]ark complete [a]rchive [d]elete [w]orkspaces tabs:1-4/[/] [?]help [q]uit"

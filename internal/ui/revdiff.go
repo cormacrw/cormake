@@ -91,7 +91,13 @@ func openRevdiffCmd(taskID, planText string) tea.Cmd {
 // openRevdiffCmd (a plan reviewed as a stdin scratch buffer), this points
 // revdiff straight at the worktree's real git state; no stdin involved, so
 // Stdin is left nil like Stdout/Stderr, same tty-wiring reasoning as above.
-func openRevdiffDiffCmd(taskID, worktreePath, baseRef string) tea.Cmd {
+//
+// resultSummary, if the task has one (the last thing claude said when the
+// run finished), is appended to what the reviewer sees via revdiff's own
+// --description-file — prose context shown in its info popup (confirmed
+// directly: press 'i' in revdiff) — alongside the diff, rather than folded
+// into the diff content itself.
+func openRevdiffDiffCmd(taskID, worktreePath, baseRef, resultSummary string) tea.Cmd {
 	outFile, err := os.CreateTemp("", "cormake-diff-annotations-*.md")
 	if err != nil {
 		return func() tea.Msg { return revdiffFinishedMsg{taskID: taskID, kind: reviewKindExecute, err: err} }
@@ -103,11 +109,30 @@ func openRevdiffDiffCmd(taskID, worktreePath, baseRef string) tea.Cmd {
 	if baseRef != "" {
 		args = append(args, baseRef)
 	}
+
+	var descPath string
+	if strings.TrimSpace(resultSummary) != "" {
+		if f, err := os.CreateTemp("", "cormake-diff-description-*.md"); err == nil {
+			descPath = f.Name()
+			f.Close()
+			if writeErr := os.WriteFile(descPath, []byte(resultSummary), 0o644); writeErr != nil {
+				os.Remove(descPath)
+				descPath = ""
+			}
+		}
+	}
+	if descPath != "" {
+		args = append(args, "--description-file", descPath)
+	}
+
 	cmd := exec.Command("revdiff", args...)
 	cmd.Dir = worktreePath
 
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		defer os.Remove(outPath)
+		if descPath != "" {
+			defer os.Remove(descPath)
+		}
 
 		var exitErr *exec.ExitError
 		hasAnnotations := errors.As(err, &exitErr) && exitErr.ExitCode() == 10
@@ -141,10 +166,14 @@ func buildRevisePrompt(annotations string) string {
 
 // buildExecuteRevisePrompt turns revdiff annotations left on the actual code
 // diff into a follow-up prompt asking claude to address them with further
-// changes in the same session/worktree.
+// changes in the same session/worktree. Ends with the same summary
+// instruction as buildExecutePrompt (see executeSummaryInstruction) since
+// this also ends a Complete-mode run whose final message becomes the task's
+// stored ResultSummary.
 func buildExecuteRevisePrompt(annotations string) string {
 	return "Here is feedback on the code changes you just made, as inline review annotations " +
 		"(each is a \"## <label>:<line>\" heading followed by the note):\n\n" +
 		annotations +
-		"\n\nPlease address this feedback with further changes."
+		"\n\nPlease address this feedback with further changes." +
+		executeSummaryInstruction
 }

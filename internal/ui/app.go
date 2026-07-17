@@ -267,7 +267,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// changes rather than the plan that preceded it — the diff
 				// is the more concrete, more current artifact.
 				if t.WorktreePath != "" {
-					return m, openRevdiffDiffCmd(t.ID, t.WorktreePath, t.WorktreeBaseRef)
+					return m, openRevdiffDiffCmd(t.ID, t.WorktreePath, t.WorktreeBaseRef, t.ResultSummary)
 				}
 				if plan := m.readPlanFile(t); plan != "" {
 					return m, openRevdiffCmd(t.ID, plan)
@@ -281,6 +281,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keys.TabPlan):
 			m.detail.ShowPlan()
+			return m, nil
+
+		case key.Matches(msg, keys.TabSummary):
+			m.detail.ShowSummary()
 			return m, nil
 
 		case key.Matches(msg, keys.TabLog):
@@ -998,6 +1002,17 @@ func buildPrompt(t domain.Task) string {
 	return "Investigate the following task and write up a plan for how to approach it:\n\n" + task
 }
 
+// executeSummaryInstruction asks claude to end a Complete-mode run on a
+// proper summary of the actual work done. It matters because the run's
+// final message becomes ev.ResultText -> Task.ResultSummary (see
+// handleAgentEvent's EventResult case) — cormake's Summary tab and the
+// description shown alongside a code review (see openRevdiffDiffCmd)
+// display that text verbatim, so without this it could just as easily end
+// on a trailing question or a bare "done".
+const executeSummaryInstruction = "\n\nWhen you are finished, your final message must be a concise summary " +
+	"of what you actually implemented (not a question, not a list of possible next steps) — it's stored " +
+	"and shown to the user as this task's result summary."
+
 // buildExecutePrompt turns a task's title/description (and its plan, if it
 // has one) into the prompt sent to claude for a real Complete-mode run.
 // Unlike buildPrompt, this asks for the work to actually be implemented —
@@ -1012,7 +1027,7 @@ func buildExecutePrompt(t domain.Task) string {
 	if t.PlanFilePath != "" {
 		prompt += fmt.Sprintf("\n\nA plan for this task was written earlier at %s — read it first and follow it.", t.PlanFilePath)
 	}
-	return prompt
+	return prompt + executeSummaryInstruction
 }
 
 // forwardEvents drains a running task's event channel onto the shared

@@ -31,6 +31,7 @@ type Tab int
 const (
 	TabDescription Tab = iota
 	TabPlan
+	TabSummary
 	TabLog
 )
 
@@ -52,6 +53,7 @@ type Model struct {
 
 	renderedDescription string
 	renderedPlan        string
+	renderedSummary     string
 
 	activeTab Tab
 
@@ -112,9 +114,15 @@ func (m Model) HasPlan() bool {
 	return strings.TrimSpace(m.planContent) != ""
 }
 
-// ShowDescription, ShowPlan, and ShowLog switch the active tab. ShowPlan is
-// a no-op when the task has no plan — same "ignore, don't pretend" pattern
-// as the Plan/Execute keys.
+// HasSummary reports whether the task has a final result message (the last
+// thing claude said when it finished a run) to show.
+func (m Model) HasSummary() bool {
+	return strings.TrimSpace(m.task.ResultSummary) != ""
+}
+
+// ShowDescription, ShowPlan, ShowSummary, and ShowLog switch the active tab.
+// ShowPlan/ShowSummary are no-ops when the task has no plan/summary yet —
+// same "ignore, don't pretend" pattern as the Plan/Execute keys.
 func (m *Model) ShowDescription() {
 	m.activeTab = TabDescription
 	m.syncViewportContent()
@@ -125,6 +133,14 @@ func (m *Model) ShowPlan() {
 		return
 	}
 	m.activeTab = TabPlan
+	m.syncViewportContent()
+}
+
+func (m *Model) ShowSummary() {
+	if !m.HasSummary() {
+		return
+	}
+	m.activeTab = TabSummary
 	m.syncViewportContent()
 }
 
@@ -139,6 +155,8 @@ func (m *Model) syncViewportContent() {
 	switch m.activeTab {
 	case TabPlan:
 		m.Viewport.SetContent(m.renderedPlan)
+	case TabSummary:
+		m.Viewport.SetContent(m.renderedSummary)
 	case TabLog:
 		m.Viewport.SetContent(strings.Join(m.logs[m.task.ID], "\n"))
 	default:
@@ -195,11 +213,14 @@ func (m Model) renderHeader() string {
 }
 
 // visibleTabs is the ordered set of tabs currently shown, respecting
-// whether the task has a plan to show.
+// whether the task has a plan and/or a result summary to show.
 func (m Model) visibleTabs() []Tab {
 	tabs := []Tab{TabDescription}
 	if m.HasPlan() {
 		tabs = append(tabs, TabPlan)
+	}
+	if m.HasSummary() {
+		tabs = append(tabs, TabSummary)
 	}
 	return append(tabs, TabLog)
 }
@@ -208,6 +229,8 @@ func tabLabel(t Tab) string {
 	switch t {
 	case TabPlan:
 		return "Plan"
+	case TabSummary:
+		return "Summary"
 	case TabLog:
 		return "Log"
 	default:
@@ -245,15 +268,20 @@ func (m Model) renderTabBar() string {
 	return strings.Join(rendered, " ")
 }
 
-// refreshRendered re-runs glamour for the description and (if present)
-// plan, which is cheap enough per task/resize but not worth doing on every
-// keystroke, so it's only called from SetSize and SetTask.
+// refreshRendered re-runs glamour for the description and (if present) plan
+// and result summary, which is cheap enough per task/resize but not worth
+// doing on every keystroke, so it's only called from SetSize and SetTask.
 func (m *Model) refreshRendered() {
 	m.renderedDescription = renderMarkdown(m.task.Description, m.width, "_no description_")
 	if m.HasPlan() {
 		m.renderedPlan = renderMarkdown(m.planContent, m.width, "_no plan_")
 	} else {
 		m.renderedPlan = ""
+	}
+	if m.HasSummary() {
+		m.renderedSummary = renderMarkdown(m.task.ResultSummary, m.width, "_no summary_")
+	} else {
+		m.renderedSummary = ""
 	}
 }
 
