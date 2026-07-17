@@ -838,15 +838,16 @@ func (m *Model) startExecuteRun() tea.Cmd {
 // runExecuteAgent spawns a Complete-mode claude run for t with the given
 // prompt, shared by the initial Execute action and the
 // revise-after-code-review flow (see revdiff.go). resumeSessionID, when
-// non-empty, continues t's existing session instead of starting a fresh
-// one — and deliberately does NOT pass WorktreeName again: claude re-enters
-// the same worktree on its own from --resume alone (verified directly), and
-// re-requesting a worktree with a name that already exists would be wrong
-// anyway. A fresh run creates a new worktree (see agent.RunSpec.WorktreeName
-// / claude/args.go) so the agent's edits land on a disposable
-// branch/directory rather than the actual checkout, and records the repo's
-// current HEAD as WorktreeBaseRef — the base a later diff review compares
-// against.
+// non-empty, continues t's existing session in its existing worktree
+// instead of starting a fresh one.
+//
+// A fresh run creates the worktree itself (see createWorktree in
+// complete.go) rather than asking claude to via -w/--worktree: confirmed
+// directly that -w forks from the repo's remote-tracking default branch
+// when one is configured, not local HEAD, silently dropping local-only
+// commits. Creating it ourselves and pointing RepoPath (-> cmd.Dir) straight
+// at it sidesteps that entirely, and also means WorktreePath is known
+// synchronously here rather than waited on from the run's first event.
 func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) tea.Cmd {
 	repoPath, ok := m.repoPath(t.RepoID)
 	if !ok || repoPath == "" {
@@ -854,23 +855,36 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 		return nil
 	}
 
-	spec := agent.RunSpec{
-		TaskID:          t.ID,
-		Prompt:          prompt,
-		RepoPath:        repoPath,
-		Mode:            agent.RunModeComplete,
-		ResumeSessionID: resumeSessionID,
-	}
-
 	sessionID := resumeSessionID
 	wtName := t.WorktreeName
 	baseRef := t.WorktreeBaseRef
+	worktreePath := t.WorktreePath
+
 	if sessionID == "" {
 		sessionID = uuid.NewString()
-		spec.SessionID = sessionID
 		wtName = worktreeName(t.ID)
-		spec.WorktreeName = wtName
 		baseRef = gitHeadRef(repoPath)
+		path, err := createWorktree(repoPath, wtName)
+		if err != nil {
+			m.detail.AppendLogLine(t.ID, logCormakeLine("failed to create worktree: "+err.Error()))
+			return nil
+		}
+		worktreePath = path
+	}
+	if worktreePath == "" {
+		m.detail.AppendLogLine(t.ID, logCormakeLine("cannot resume — task has no worktree"))
+		return nil
+	}
+
+	spec := agent.RunSpec{
+		TaskID:          t.ID,
+		Prompt:          prompt,
+		RepoPath:        worktreePath,
+		Mode:            agent.RunModeComplete,
+		ResumeSessionID: resumeSessionID,
+	}
+	if resumeSessionID == "" {
+		spec.SessionID = sessionID
 	}
 
 	handle, err := m.runner.Start(context.Background(), spec)
@@ -885,6 +899,7 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 			m.tasks[i].SessionID = sessionID
 			m.tasks[i].WorktreeName = wtName
 			m.tasks[i].WorktreeBaseRef = baseRef
+			m.tasks[i].WorktreePath = worktreePath
 			m.persistTask(m.tasks[i])
 			break
 		}
@@ -1057,21 +1072,6 @@ func (m *Model) handleAgentEvent(ev agent.Event) {
 	m.detail.AppendLogLine(ev.TaskID, formatAgentLogLine(ev))
 
 	switch ev.Type {
-	case agent.EventInit:
-		// Only Complete-mode runs set WorktreeName before spawning (see
-		// startExecuteRun) — a Plan run's cwd is just the repo itself, not
-		// worth recording as a "worktree path".
-		if ev.Cwd != "" {
-			for i := range m.tasks {
-				if m.tasks[i].ID != ev.TaskID {
-					continue
-				}
-				if m.tasks[i].WorktreeName != "" {
-					m.tasks[i].WorktreePath = ev.Cwd
-				}
-				break
-			}
-		}
 	case agent.EventToolUse:
 		if path, ok := extractPlanFilePath(ev.ToolName, ev.ToolInput); ok {
 			m.setPlanFilePath(ev.TaskID, path)

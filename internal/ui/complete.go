@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,11 +20,12 @@ type completeFinishedMsg struct {
 
 // completeTaskCmd commits any outstanding changes in the task's worktree,
 // renames its branch to branch, and removes the worktree — the standard
-// "done with this worktree" sequence for a git worktree claude created (via
-// -w). Such a worktree is locked while its session is active; unlocking is
-// required before `git worktree remove` will touch it (confirmed directly —
-// remove fails outright otherwise with "cannot remove a locked working
-// tree").
+// "done with this worktree" sequence. The unlock call is best-effort: a
+// worktree cormake created itself (see createWorktree) is never locked, but
+// this also has to handle worktrees created by older cormake builds via
+// claude's own -w, which does lock them while its session is active —
+// `git worktree remove` refuses those outright otherwise (confirmed
+// directly: "cannot remove a locked working tree").
 func completeTaskCmd(taskID, repoPath, worktreePath, branch, commitMessage string) tea.Cmd {
 	return func() tea.Msg {
 		if err := commitWorktreeChanges(worktreePath, commitMessage); err != nil {
@@ -62,6 +64,23 @@ func commitWorktreeChanges(worktreePath, message string) error {
 		return fmt.Errorf("%w: %s", err, out)
 	}
 	return nil
+}
+
+// createWorktree creates a new git worktree at
+// <repoPath>/.claude/worktrees/<name>, forking from repoPath's actual local
+// HEAD. This is deliberately cormake's own job rather than handed to
+// claude's own -w/--worktree flag: confirmed directly that -w instead forks
+// from the repo's remote-tracking default branch whenever one is
+// configured — regardless of which local branch is checked out or how far
+// local HEAD has diverged from it — silently dropping any local-only
+// commits. Doing it ourselves guarantees the worktree actually reflects
+// what's on disk.
+func createWorktree(repoPath, name string) (string, error) {
+	path := filepath.Join(repoPath, ".claude", "worktrees", name)
+	if out, err := runGit(repoPath, "worktree", "add", "-b", name, path, "HEAD"); err != nil {
+		return "", fmt.Errorf("%w: %s", err, out)
+	}
+	return path, nil
 }
 
 // runGit runs `git -C dir <args...>` and returns its combined output

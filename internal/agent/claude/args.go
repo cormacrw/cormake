@@ -30,12 +30,12 @@ func BuildArgs(spec agent.RunSpec) []string {
 		// real progress: any tool needing a permission prompt would just
 		// hang forever otherwise, since there's no TTY to answer it (verified
 		// directly — acceptEdits alone stalls the first time it needs Bash).
-		// The worktree (-w) is what makes that acceptable: real edits, but
-		// on a disposable branch/directory instead of the actual checkout.
+		// That's made acceptable by RepoPath pointing at a disposable
+		// worktree rather than the actual checkout — created by cormake
+		// itself (see createWorktree), not via claude's own -w/--worktree:
+		// confirmed directly that -w forks from the repo's remote-tracking
+		// branch instead of local HEAD whenever one is configured.
 		args = append(args, "--permission-mode", "bypassPermissions")
-		if spec.WorktreeName != "" {
-			args = append(args, "-w", spec.WorktreeName)
-		}
 	}
 	return append(args, spec.Prompt)
 }
