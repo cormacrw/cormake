@@ -170,7 +170,16 @@ func (m *Model) syncViewportContent() {
 // the viewport updates immediately and stays scrolled to the bottom (tail
 // -f style); otherwise the line just waits in m.logs for whenever the user
 // switches to it.
+//
+// The viewport itself doesn't wrap long lines — anything wider than it just
+// overflows and gets hard-clipped/wrapped by the terminal at whatever
+// column it happens to hit, mid-word, even slicing into the pane's own
+// border character (confirmed directly). Wrapping here, at append time
+// while m.width is known, keeps every line's visible width honest instead.
 func (m *Model) AppendLogLine(taskID, line string) {
+	if m.width > 0 {
+		line = lipgloss.NewStyle().Width(m.width).Render(line)
+	}
 	m.logs[taskID] = append(m.logs[taskID], line)
 	if m.task.ID == taskID && m.activeTab == TabLog {
 		m.Viewport.SetContent(strings.Join(m.logs[taskID], "\n"))

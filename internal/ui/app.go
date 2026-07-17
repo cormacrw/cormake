@@ -494,10 +494,10 @@ func (m *Model) startCompleteTask(branch string) tea.Cmd {
 	}
 	repoPath, ok := m.repoPath(target.RepoID)
 	if !ok || repoPath == "" {
-		m.detail.AppendLogLine(target.ID, "cormake: cannot complete — task has no repo assigned")
+		m.detail.AppendLogLine(target.ID, logCormakeLine("cannot complete — task has no repo assigned"))
 		return nil
 	}
-	m.detail.AppendLogLine(target.ID, "cormake: finalizing onto branch "+branch)
+	m.detail.AppendLogLine(target.ID, logCormakeLine("finalizing onto branch "+branch))
 	return completeTaskCmd(target.ID, repoPath, target.WorktreePath, branch, "cormake: "+target.Title)
 }
 
@@ -509,7 +509,7 @@ func (m *Model) startCompleteTask(branch string) tea.Cmd {
 // worktree intact — so nothing is lost and completing can be retried.
 func (m *Model) handleCompleteFinished(msg completeFinishedMsg) {
 	if msg.err != nil {
-		m.detail.AppendLogLine(msg.taskID, "cormake: failed to complete: "+msg.err.Error())
+		m.detail.AppendLogLine(msg.taskID, logCormakeLine("failed to complete: "+msg.err.Error()))
 		return
 	}
 	for i := range m.tasks {
@@ -784,7 +784,7 @@ func (m *Model) startPlanRun() tea.Cmd {
 func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.Cmd {
 	repoPath, ok := m.repoPath(t.RepoID)
 	if !ok || repoPath == "" {
-		m.detail.AppendLogLine(t.ID, "cormake: cannot start — task has no repo assigned")
+		m.detail.AppendLogLine(t.ID, logCormakeLine("cannot start — task has no repo assigned"))
 		return nil
 	}
 
@@ -803,7 +803,7 @@ func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.
 
 	handle, err := m.runner.Start(context.Background(), spec)
 	if err != nil {
-		m.detail.AppendLogLine(t.ID, "cormake: failed to start: "+err.Error())
+		m.detail.AppendLogLine(t.ID, logCormakeLine("failed to start: "+err.Error()))
 		return nil
 	}
 
@@ -849,7 +849,7 @@ func (m *Model) startExecuteRun() tea.Cmd {
 func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) tea.Cmd {
 	repoPath, ok := m.repoPath(t.RepoID)
 	if !ok || repoPath == "" {
-		m.detail.AppendLogLine(t.ID, "cormake: cannot start — task has no repo assigned")
+		m.detail.AppendLogLine(t.ID, logCormakeLine("cannot start — task has no repo assigned"))
 		return nil
 	}
 
@@ -874,7 +874,7 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 
 	handle, err := m.runner.Start(context.Background(), spec)
 	if err != nil {
-		m.detail.AppendLogLine(t.ID, "cormake: failed to start: "+err.Error())
+		m.detail.AppendLogLine(t.ID, logCormakeLine("failed to start: "+err.Error()))
 		return nil
 	}
 
@@ -932,7 +932,7 @@ func shortTaskID(id string) string {
 // rather than two.
 func (m *Model) handleRevdiffFinished(msg revdiffFinishedMsg) tea.Cmd {
 	if msg.err != nil {
-		m.detail.AppendLogLine(msg.taskID, "cormake: revdiff failed: "+msg.err.Error())
+		m.detail.AppendLogLine(msg.taskID, logCormakeLine("revdiff failed: "+msg.err.Error()))
 		return nil
 	}
 	if msg.annotations == "" {
@@ -943,7 +943,7 @@ func (m *Model) handleRevdiffFinished(msg revdiffFinishedMsg) tea.Cmd {
 		if t.ID != msg.taskID {
 			continue
 		}
-		m.detail.AppendLogLine(t.ID, "cormake: sending review feedback to claude for revision")
+		m.detail.AppendLogLine(t.ID, logCormakeLine("sending review feedback to claude for revision"))
 		if msg.kind == reviewKindExecute {
 			return m.runExecuteAgent(t, buildExecuteRevisePrompt(msg.annotations), t.SessionID)
 		}
@@ -1047,10 +1047,16 @@ func forwardEvents(eventsCh chan<- tea.Msg, taskID string, h *agent.Handle) {
 // handleAgentEvent appends a formatted line to the task's live log for
 // every event type, and additionally captures the final result text/cost
 // onto the task itself when the run reports one.
+// handleAgentEvent appends a formatted line to the task's live log for
+// every event type (see logformat.go for how each kind renders), and
+// separately handles whatever side effect that event type carries — none of
+// which affect how the line reads, so they're kept out of formatAgentLogLine
+// entirely.
 func (m *Model) handleAgentEvent(ev agent.Event) {
+	m.detail.AppendLogLine(ev.TaskID, formatAgentLogLine(ev))
+
 	switch ev.Type {
 	case agent.EventInit:
-		m.detail.AppendLogLine(ev.TaskID, fmt.Sprintf("[init] model=%s", ev.Text))
 		// Only Complete-mode runs set WorktreeName before spawning (see
 		// startExecuteRun) — a Plan run's cwd is just the repo itself, not
 		// worth recording as a "worktree path".
@@ -1065,21 +1071,11 @@ func (m *Model) handleAgentEvent(ev agent.Event) {
 				break
 			}
 		}
-	case agent.EventText:
-		prefix := "assistant"
-		if ev.IsSubagent {
-			prefix = "subagent"
-		}
-		m.detail.AppendLogLine(ev.TaskID, prefix+": "+ev.Text)
 	case agent.EventToolUse:
-		m.detail.AppendLogLine(ev.TaskID, fmt.Sprintf("tool_use: %s(%s)", ev.ToolName, ev.ToolInput))
 		if path, ok := extractPlanFilePath(ev.ToolName, ev.ToolInput); ok {
 			m.setPlanFilePath(ev.TaskID, path)
 		}
-	case agent.EventToolResult:
-		m.detail.AppendLogLine(ev.TaskID, "tool_result: "+ev.Text)
 	case agent.EventResult:
-		m.detail.AppendLogLine(ev.TaskID, "result: "+ev.ResultText)
 		for i := range m.tasks {
 			if m.tasks[i].ID == ev.TaskID {
 				m.tasks[i].ResultSummary = ev.ResultText
@@ -1087,10 +1083,6 @@ func (m *Model) handleAgentEvent(ev agent.Event) {
 				break
 			}
 		}
-	case agent.EventStderrLine:
-		m.detail.AppendLogLine(ev.TaskID, "stderr: "+ev.Text)
-	case agent.EventProcessError:
-		m.detail.AppendLogLine(ev.TaskID, "error: "+ev.Err.Error())
 	}
 }
 
