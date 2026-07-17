@@ -1,7 +1,8 @@
-// Package detail renders the right-hand side of the app: a top panel with
-// the selected task's title, metadata, and markdown description (rendered
-// via glamour), and a log viewport underneath. Editing happens in an
-// external editor (see internal/ui/editor.go), not in this pane.
+// Package detail renders the right-hand side of the app: a fixed header
+// (title, metadata, tab bar) over a single scrollable content area that
+// shows whichever tab is active — Description, Plan (only when the task
+// has one), or Log. Editing happens in an external editor (see
+// internal/ui/editor.go), not in this pane.
 package detail
 
 import (
@@ -17,30 +18,42 @@ import (
 )
 
 var (
-	titleStyle   = lipgloss.NewStyle().Bold(true)
-	metaStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	dividerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	titleStyle       = lipgloss.NewStyle().Bold(true)
+	metaStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	dividerStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	activeTabStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
+	inactiveTabStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 )
 
-// topHeightPct is the share of the pane's height given to the
-// title/info/description panel; the rest goes to the log viewport below it.
-const topHeightPct = 0.45
+// Tab is which content the pane's single scrollable area is showing.
+type Tab int
+
+const (
+	TabDescription Tab = iota
+	TabPlan
+	TabLog
+)
+
+// headerHeight is the fixed number of rows the title/meta/tab-bar/divider
+// block occupies; everything else goes to the active tab's content.
+const headerHeight = 4
 
 type Model struct {
-	Viewport viewport.Model // the log, bottom panel
+	Viewport viewport.Model // content area, shared across tabs (only one is visible at a time)
 
 	task     domain.Task
-	wsName   string
 	repoName string
 	logs     map[string][]string
 
-	renderedBody string
+	renderedDescription string
+	renderedPlan        string
+
+	activeTab Tab
 
 	empty        bool
 	emptyMessage string
 
 	width, height int
-	topHeight     int
 }
 
 func New(logs map[string][]string) Model {
@@ -54,32 +67,28 @@ func (m *Model) SetSize(w, h int) {
 	m.width = w
 	m.height = h
 
-	m.topHeight = int(float64(h) * topHeightPct)
-	if m.topHeight < 4 {
-		m.topHeight = 4
+	contentHeight := h - headerHeight
+	if contentHeight < 1 {
+		contentHeight = 1
 	}
-	logHeight := h - m.topHeight
-	if logHeight < 1 {
-		logHeight = 1
-	}
-
 	m.Viewport.Width = w
-	m.Viewport.Height = logHeight
+	m.Viewport.Height = contentHeight
 
-	m.refreshRenderedBody()
+	m.refreshRendered()
+	m.syncViewportContent()
 }
 
-// SetTask switches the displayed task, refreshing the info panel and log
-// content, and scrolls the log back to the top of the new task's log.
-// wsName/repoName are resolved display names, since Task only stores IDs.
-func (m *Model) SetTask(t domain.Task, wsName, repoName string) {
+// SetTask switches the displayed task, refreshing all tab content and
+// resetting to the Description tab — a predictable default rather than
+// carrying over whatever tab happened to be active for the last task.
+// repoName is the resolved display name, since Task only stores a RepoID.
+func (m *Model) SetTask(t domain.Task, repoName string) {
 	m.empty = false
 	m.task = t
-	m.wsName = wsName
 	m.repoName = repoName
-	m.Viewport.SetContent(strings.Join(m.logs[t.ID], "\n"))
-	m.Viewport.SetYOffset(0)
-	m.refreshRenderedBody()
+	m.activeTab = TabDescription
+	m.refreshRendered()
+	m.syncViewportContent()
 }
 
 // SetEmpty replaces the normal task view with a centered message — used
@@ -90,9 +99,51 @@ func (m *Model) SetEmpty(msg string) {
 	m.emptyMessage = msg
 }
 
-// ScrollLog forwards a paging key straight to the log viewport, independent
-// of whatever's shown in the top panel.
-func (m *Model) ScrollLog(msg tea.Msg) tea.Cmd {
+// HasPlan reports whether the task has plan content to show — currently a
+// proxy for "ResultSummary is set", since Status alone can't tell (it keeps
+// moving forward past PLANNED once execution starts).
+func (m Model) HasPlan() bool {
+	return strings.TrimSpace(m.task.ResultSummary) != ""
+}
+
+// ShowDescription, ShowPlan, and ShowLog switch the active tab. ShowPlan is
+// a no-op when the task has no plan — same "ignore, don't pretend" pattern
+// as the Plan/Execute keys.
+func (m *Model) ShowDescription() {
+	m.activeTab = TabDescription
+	m.syncViewportContent()
+}
+
+func (m *Model) ShowPlan() {
+	if !m.HasPlan() {
+		return
+	}
+	m.activeTab = TabPlan
+	m.syncViewportContent()
+}
+
+func (m *Model) ShowLog() {
+	m.activeTab = TabLog
+	m.syncViewportContent()
+}
+
+// syncViewportContent loads whichever tab is active into the shared
+// viewport and scrolls back to the top.
+func (m *Model) syncViewportContent() {
+	switch m.activeTab {
+	case TabPlan:
+		m.Viewport.SetContent(m.renderedPlan)
+	case TabLog:
+		m.Viewport.SetContent(strings.Join(m.logs[m.task.ID], "\n"))
+	default:
+		m.Viewport.SetContent(m.renderedDescription)
+	}
+	m.Viewport.SetYOffset(0)
+}
+
+// Scroll forwards a paging key straight to the content viewport, whichever
+// tab it's currently showing.
+func (m *Model) Scroll(msg tea.Msg) tea.Cmd {
 	var cmd tea.Cmd
 	m.Viewport, cmd = m.Viewport.Update(msg)
 	return cmd
@@ -103,30 +154,93 @@ func (m Model) View() string {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
 			metaStyle.Render(m.emptyMessage))
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, m.renderTop(), m.Viewport.View())
+	return lipgloss.JoinVertical(lipgloss.Left, m.renderHeader(), m.Viewport.View())
 }
 
-func (m Model) renderTop() string {
+// renderHeader always produces headerHeight lines (title, meta, tab bar,
+// divider) — pinning Height/MaxHeight to that forces truncation instead of
+// letting an over-length line wrap the block taller, which would silently
+// eat into the content viewport's height below it.
+func (m Model) renderHeader() string {
 	stage, glyph := m.task.DisplayStage()
 	title := titleStyle.Render(truncate(m.task.Title, m.width-8)) + " #" + shortID(m.task.ID)
-	meta := metaStyle.Render(fmt.Sprintf("workspace: %s   repo: %s   %s %s",
-		m.wsName, m.repoName, glyph, stage))
+	// Workspace isn't shown here — the app's top bar already names the
+	// active workspace, so repeating it in every task's header is redundant.
+	metaText := fmt.Sprintf("repo: %s   %s %s", m.repoName, glyph, stage)
+	meta := metaStyle.Render(truncate(metaText, m.width))
+	tabBar := m.renderTabBar()
 	divider := dividerStyle.Render(strings.Repeat("─", max0(m.width)))
 
-	content := strings.Join([]string{title, meta, divider, m.renderedBody}, "\n")
-	return lipgloss.NewStyle().Width(m.width).Height(m.topHeight).MaxHeight(m.topHeight).MaxWidth(m.width).Render(content)
+	content := strings.Join([]string{title, meta, tabBar, divider}, "\n")
+	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Height(headerHeight).MaxHeight(headerHeight).Render(content)
 }
 
-// refreshRenderedBody re-runs glamour, which is cheap enough for task
-// descriptions but not worth doing on every keystroke, so it's only called
-// when the task or the available width changes.
-func (m *Model) refreshRenderedBody() {
-	m.renderedBody = renderMarkdown(m.task.Description, m.width)
+// visibleTabs is the ordered set of tabs currently shown, respecting
+// whether the task has a plan to show.
+func (m Model) visibleTabs() []Tab {
+	tabs := []Tab{TabDescription}
+	if m.HasPlan() {
+		tabs = append(tabs, TabPlan)
+	}
+	return append(tabs, TabLog)
 }
 
-func renderMarkdown(md string, width int) string {
+func tabLabel(t Tab) string {
+	switch t {
+	case TabPlan:
+		return "Plan"
+	case TabLog:
+		return "Log"
+	default:
+		return "Description"
+	}
+}
+
+// CycleTab moves to the next (delta > 0) or previous (delta < 0) visible
+// tab, wrapping around.
+func (m *Model) CycleTab(delta int) {
+	tabs := m.visibleTabs()
+	idx := 0
+	for i, t := range tabs {
+		if t == m.activeTab {
+			idx = i
+			break
+		}
+	}
+	idx = ((idx+delta)%len(tabs) + len(tabs)) % len(tabs)
+	m.activeTab = tabs[idx]
+	m.syncViewportContent()
+}
+
+func (m Model) renderTabBar() string {
+	tabs := m.visibleTabs()
+	rendered := make([]string, len(tabs))
+	for i, t := range tabs {
+		label := tabLabel(t)
+		if t == m.activeTab {
+			rendered[i] = activeTabStyle.Render("[" + label + "]")
+		} else {
+			rendered[i] = inactiveTabStyle.Render(" " + label + " ")
+		}
+	}
+	return strings.Join(rendered, " ")
+}
+
+// refreshRendered re-runs glamour for the description and (if present)
+// plan, which is cheap enough per task/resize but not worth doing on every
+// keystroke, so it's only called from SetSize and SetTask.
+func (m *Model) refreshRendered() {
+	m.renderedDescription = renderMarkdown(m.task.Description, m.width, "_no description_")
+	if m.HasPlan() {
+		m.renderedPlan = renderMarkdown(m.task.ResultSummary, m.width, "_no plan_")
+	} else {
+		m.renderedPlan = ""
+	}
+}
+
+func renderMarkdown(md string, width int, emptyText string) string {
 	if strings.TrimSpace(md) == "" {
-		return metaStyle.Render("_no description_")
+		return metaStyle.Render(emptyText)
 	}
 	if width < 1 {
 		width = 1

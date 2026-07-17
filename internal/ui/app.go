@@ -45,8 +45,7 @@ type Model struct {
 	confirmTo        domain.Status
 	confirmFrom      []domain.Status
 
-	workspaceNames map[string]string
-	repoNames      map[string]string
+	repoNames map[string]string
 
 	tasklist tasklist.Model
 	detail   detail.Model
@@ -78,10 +77,8 @@ func New(st *store.Store) (Model, error) {
 		return Model{}, err
 	}
 
-	wsNames := make(map[string]string, len(workspaces))
 	repoNames := make(map[string]string)
 	for _, w := range workspaces {
-		wsNames[w.ID] = w.Name
 		for _, r := range w.Repos {
 			repoNames[r.ID] = r.Name
 		}
@@ -93,14 +90,13 @@ func New(st *store.Store) (Model, error) {
 	ti.Width = 40
 
 	m := Model{
-		store:          st,
-		workspaces:     workspaces,
-		tasks:          tasks,
-		workspaceNames: wsNames,
-		repoNames:      repoNames,
-		tasklist:       tasklist.New(nil),
-		detail:         detail.New(map[string][]string{}),
-		newTaskInput:   ti,
+		store:        st,
+		workspaces:   workspaces,
+		tasks:        tasks,
+		repoNames:    repoNames,
+		tasklist:     tasklist.New(nil),
+		detail:       detail.New(map[string][]string{}),
+		newTaskInput: ti,
 	}
 	m.refreshTaskList()
 	return m, nil
@@ -148,7 +144,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case key.Matches(msg, keys.PgUp, keys.PgDown):
-			cmd := m.detail.ScrollLog(msg)
+			cmd := m.detail.Scroll(msg)
 			return m, cmd
 
 		case key.Matches(msg, keys.Left):
@@ -187,6 +183,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keys.Execute):
 			m.openConfirm("Start executing", domain.StatusInProgress, domain.StatusTodo, domain.StatusPlanned)
+			return m, nil
+
+		case key.Matches(msg, keys.TabDescription):
+			m.detail.ShowDescription()
+			return m, nil
+
+		case key.Matches(msg, keys.TabPlan):
+			m.detail.ShowPlan()
+			return m, nil
+
+		case key.Matches(msg, keys.TabLog):
+			m.detail.ShowLog()
+			return m, nil
+
+		case key.Matches(msg, keys.TabPrev):
+			m.detail.CycleTab(-1)
+			return m, nil
+
+		case key.Matches(msg, keys.TabNext):
+			m.detail.CycleTab(1)
 			return m, nil
 
 		case key.Matches(msg, keys.Cancel, keys.Help):
@@ -264,15 +280,12 @@ func (m *Model) reloadWorkspaces() {
 		m.activeWS = 0
 	}
 
-	wsNames := make(map[string]string, len(workspaces))
 	repoNames := make(map[string]string)
 	for _, w := range workspaces {
-		wsNames[w.ID] = w.Name
 		for _, r := range w.Repos {
 			repoNames[r.ID] = r.Name
 		}
 	}
-	m.workspaceNames = wsNames
 	m.repoNames = repoNames
 	m.refreshTaskList()
 }
@@ -525,7 +538,7 @@ func (m *Model) syncDetail() {
 		m.detail.SetEmpty(msg)
 		return
 	}
-	m.detail.SetTask(t, m.workspaceNames[t.WorkspaceID], m.repoNames[t.RepoID])
+	m.detail.SetTask(t, m.repoNames[t.RepoID])
 }
 
 func (m Model) currentWorkspaceName() string {
@@ -583,10 +596,13 @@ func (m Model) View() string {
 
 	top := m.renderTabBar()
 	body := m.renderBody()
-	// MaxWidth, not just Width: Width alone pads short content but wraps
-	// (rather than truncates) content wider than it, which silently adds an
-	// extra line and pushes the tab bar off-screen — bit us once already.
-	footer := footerStyle.Width(m.width).MaxWidth(m.width).Render(footerHelp)
+	// Width/MaxWidth alone isn't enough: content wider than that still
+	// *wraps* onto a second line instead of getting cut off (confirmed by
+	// testing directly — MaxWidth only bounds the wrap column, not the line
+	// count), which silently pushes the tab bar off-screen. Height/MaxHeight
+	// pinned to 1 is what actually forces truncation. Bit us on this exact
+	// line once already from an incomplete version of this fix.
+	footer := footerStyle.Width(m.width).MaxWidth(m.width).Height(1).MaxHeight(1).Render(footerHelp)
 
 	return lipgloss.JoinVertical(lipgloss.Left, top, body, footer)
 }
@@ -612,7 +628,7 @@ func (m Model) renderTabBar() string {
 		gap = 1
 	}
 	bar := tabs + strings.Repeat(" ", gap) + wsInfo
-	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Render(bar)
+	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Height(1).MaxHeight(1).Render(bar)
 }
 
 // renderWorkspaceModal draws the workspace picker, centered over the full
