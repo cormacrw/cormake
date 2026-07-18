@@ -21,9 +21,9 @@ const DefaultSourceBranch = "develop"
 // READY_FOR_REVIEW task can be archived (parking work that isn't actively
 // in an agent's hands), and unarchiving restores whichever of those two
 // statuses it was archived from. COMPLETE/FAILED/CANCELLED tasks land in
-// the archive view automatically, without needing to be archived manually
-// or being able to be unarchived — they're already a finished outcome, not
-// parked work.
+// the Completed tab automatically instead, without needing to be archived
+// manually or being able to be unarchived — they're already a finished
+// outcome, not parked work.
 type Status string
 
 const (
@@ -189,13 +189,21 @@ func (t Task) DisplayStage() (stage Stage, glyph string) {
 	}
 }
 
-// IsArchived reports whether the task belongs in the archive view: either
-// it was archived manually, or it reached a terminal outcome (complete,
-// failed, or cancelled) on its own. Only the manual case can be undone —
-// see CanArchive.
+// IsArchived reports whether the task belongs in the Archived tab: it was
+// manually archived, parking it out of the active TODO view without it
+// being a finished outcome. See CanArchive for how a task gets here, and
+// IsCompleted for the separate, automatic terminal-outcome case.
 func (t Task) IsArchived() bool {
+	return t.Status == StatusArchived
+}
+
+// IsCompleted reports whether the task belongs in the Completed tab: it
+// reached a terminal outcome (complete, failed, or cancelled) on its own,
+// rather than being manually archived. Unlike an archived task, this can't
+// be undone — it's already a finished outcome, not parked work.
+func (t Task) IsCompleted() bool {
 	switch t.Status {
-	case StatusArchived, StatusComplete, StatusFailed, StatusCancelled:
+	case StatusComplete, StatusFailed, StatusCancelled:
 		return true
 	default:
 		return false

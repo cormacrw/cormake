@@ -36,12 +36,23 @@ const (
 	listWidthPct = 0.30
 )
 
+// taskTab selects which of the task list's three tabs is showing: the
+// active TODO pipeline, manually-parked Archived tasks, or automatically
+// terminal Completed tasks (see domain.Task.IsArchived/IsCompleted).
+type taskTab int
+
+const (
+	taskTabTodo taskTab = iota
+	taskTabArchived
+	taskTabCompleted
+)
+
 type Model struct {
-	store       *store.Store
-	workspaces  []domain.Workspace
-	activeWS    int
-	tasks       []domain.Task
-	showArchive bool
+	store      *store.Store
+	workspaces []domain.Workspace
+	activeWS   int
+	tasks      []domain.Task
+	activeTab  taskTab
 
 	workspaceModalOpen bool
 	workspaceCursor    int
@@ -371,12 +382,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 
 		case key.Matches(msg, keys.Left):
-			m.showArchive = false
+			if m.activeTab > taskTabTodo {
+				m.activeTab--
+			}
 			m.refreshTaskList()
 			return m, nil
 
 		case key.Matches(msg, keys.Right):
-			m.showArchive = true
+			if m.activeTab < taskTabCompleted {
+				m.activeTab++
+			}
 			m.refreshTaskList()
 			return m, nil
 
@@ -830,7 +845,7 @@ func (m *Model) createTask(title, repoID, targetBranch, sourceBranch string) {
 	m.tasks = append(m.tasks, t)
 	m.persistTask(t)
 	m.persistWorkspaces()
-	m.showArchive = false // a fresh TODO task belongs in the Open view
+	m.activeTab = taskTabTodo // a fresh TODO task belongs in the TODO view
 	m.refreshTaskList()
 	m.tasklist.SelectByID(t.ID)
 	m.syncDetail()
@@ -1618,10 +1633,10 @@ func (m *Model) setWorkspace(idx int) {
 }
 
 // refreshTaskList rebuilds the visible task list from the active workspace
-// and the active/archive view toggle: the default view is everything still
-// actionable (todo, planning, in progress, awaiting input, ready for
-// review), while the archive view holds tasks that reached a terminal
-// outcome (complete, failed, or cancelled).
+// and the active tab: TODO holds everything still actionable (todo,
+// planning, in progress, awaiting input, ready for review), Archived holds
+// manually-parked tasks (domain.Task.IsArchived), and Completed holds tasks
+// that reached a terminal outcome on their own (domain.Task.IsCompleted).
 func (m *Model) refreshTaskList() {
 	if len(m.workspaces) == 0 {
 		return
@@ -1633,7 +1648,7 @@ func (m *Model) refreshTaskList() {
 		if t.WorkspaceID != activeID {
 			continue
 		}
-		if t.IsArchived() != m.showArchive {
+		if !m.taskBelongsToActiveTab(t) {
 			continue
 		}
 		filtered = append(filtered, t)
@@ -1642,12 +1657,28 @@ func (m *Model) refreshTaskList() {
 	m.syncDetail()
 }
 
+// taskBelongsToActiveTab reports whether t should be shown under the
+// currently selected tab (see taskTab).
+func (m *Model) taskBelongsToActiveTab(t domain.Task) bool {
+	switch m.activeTab {
+	case taskTabArchived:
+		return t.IsArchived()
+	case taskTabCompleted:
+		return t.IsCompleted()
+	default:
+		return !t.IsArchived() && !t.IsCompleted()
+	}
+}
+
 func (m *Model) syncDetail() {
 	t, ok := m.tasklist.Selected()
 	if !ok {
 		msg := "No tasks yet.\n\nPress n to create one."
-		if m.showArchive {
+		switch m.activeTab {
+		case taskTabArchived:
 			msg = "No archived tasks."
+		case taskTabCompleted:
+			msg = "No completed tasks."
 		}
 		m.detail.SetEmpty(msg)
 		return
@@ -1705,7 +1736,7 @@ func (m Model) paneDims() (leftTotal, rightTotal, contentHeight int) {
 // wordmark text.
 const cormakePaneOuterHeight = 3
 
-// taskTabsHeight is the fixed single row the Open/Archived tabs occupy,
+// taskTabsHeight is the fixed single row the TODO/Archived/Completed tabs occupy,
 // unbordered, between the CORMAKE tile and the task list (see
 // renderTaskTabs/renderBody).
 const taskTabsHeight = 1
@@ -1776,7 +1807,7 @@ func (m Model) View() string {
 }
 
 // renderTopBar renders the current workspace name, right-aligned across the
-// full width — the Open/Archived task tabs used to live here too, but now
+// full width — the TODO/Archived/Completed task tabs used to live here too, but now
 // sit under the CORMAKE tile instead (see renderTaskTabs), since they only
 // ever affect the task list beneath them, not the whole app.
 func (m Model) renderTopBar() string {
@@ -1789,20 +1820,23 @@ func (m Model) renderTopBar() string {
 	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Height(1).MaxHeight(1).Render(bar)
 }
 
-// renderTaskTabs renders the Open/Archived tabs scoped to the left column's
-// width — placed between the CORMAKE tile and the task list (see
-// renderBody) since they only switch which tasks that list below them
+// renderTaskTabs renders the TODO/Archived/Completed tabs scoped to the
+// left column's width — placed between the CORMAKE tile and the task list
+// (see renderBody) since they only switch which tasks that list below them
 // shows.
 func (m Model) renderTaskTabs(width int) string {
-	open, archived := " Open ", " Archived "
-	if !m.showArchive {
-		open = activeTabStyle().Render("[Open]")
-		archived = inactiveTabStyle.Render(archived)
-	} else {
-		open = inactiveTabStyle.Render(open)
-		archived = activeTabStyle().Render("[Archived]")
+	labels := []string{" TODO ", " Archived ", " Completed "}
+	labels[m.activeTab] = "[" + strings.TrimSpace(labels[m.activeTab]) + "]"
+
+	rendered := make([]string, len(labels))
+	for i, label := range labels {
+		if taskTab(i) == m.activeTab {
+			rendered[i] = activeTabStyle().Render(label)
+		} else {
+			rendered[i] = inactiveTabStyle.Render(label)
+		}
 	}
-	tabs := " " + open + "  " + archived
+	tabs := " " + strings.Join(rendered, "  ")
 	return lipgloss.NewStyle().Width(width).MaxWidth(width).Height(1).MaxHeight(1).Render(tabs)
 }
 

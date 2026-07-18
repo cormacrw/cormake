@@ -7,21 +7,22 @@ import "github.com/charmbracelet/bubbles/key"
 type KeyMap struct {
 	Up     key.Binding
 	Down   key.Binding
-	Left   key.Binding // switches to the Open tab
-	Right  key.Binding // switches to the Archived tab
+	Left   key.Binding // moves to the previous task tab (TODO/Archived/Completed)
+	Right  key.Binding // moves to the next task tab (TODO/Archived/Completed)
 	PgUp   key.Binding
 	PgDown key.Binding
 	Quit   key.Binding
 
 	// Scroll covers the bare arrow keys, forwarded straight to the detail
 	// pane's content viewport. Arrow keys are reserved for scrolling only —
-	// list navigation and the Open/Archived switch use their vim-key
-	// equivalents (k/j/h/l) instead, so a key never does double duty.
+	// list navigation and the tab switch use their vim-key equivalents
+	// (k/j/h/l) instead, so a key never does double duty.
 	Scroll key.Binding
 
 	// Archive parks a TODO or READY_FOR_REVIEW task out of the active view
-	// (or restores one already archived) — not a finished outcome, just set
-	// aside. See Complete below for actually finishing a task's work.
+	// and into the Archived tab (or restores one already archived) — not a
+	// finished outcome, just set aside. See Complete below for actually
+	// finishing a task's work.
 	Archive key.Binding
 
 	// Delete permanently removes the selected task, from any stage, behind
