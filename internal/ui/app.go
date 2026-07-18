@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -50,6 +51,14 @@ type Model struct {
 	completeModalOpen bool
 	completeInput     textinput.Model
 	completeTaskID    string
+
+	// inputModalOpen stages a free-form message to send to a PLANNED or
+	// READY_FOR_REVIEW task's claude session (see keys.Input) — a lighter
+	// alternative to the revdiff-based Review flow when there's nothing to
+	// annotate on the artifact itself, just something to say.
+	inputModalOpen bool
+	inputTextarea  textarea.Model
+	inputTaskID    string
 
 	confirmModalOpen bool
 	confirmMessage   string
@@ -174,6 +183,13 @@ func New(st *store.Store) (Model, error) {
 	ci.CharLimit = 200
 	ci.Width = 40
 
+	ta := textarea.New()
+	ta.Placeholder = "Type a message to send to claude..."
+	ta.CharLimit = 4000
+	ta.SetWidth(60)
+	ta.SetHeight(8)
+	ta.ShowLineNumbers = false
+
 	m := Model{
 		store:         st,
 		workspaces:    workspaces,
@@ -183,6 +199,7 @@ func New(st *store.Store) (Model, error) {
 		detail:        detail.New(logs),
 		newTaskInput:  ti,
 		completeInput: ci,
+		inputTextarea: ta,
 		runner:        claude.Client{},
 		eventsCh:      make(chan tea.Msg, 64),
 		active:        make(map[string]*agent.Handle),
@@ -274,6 +291,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateCompleteModal(msg)
 		}
 
+		if m.inputModalOpen {
+			return m.updateInputModal(msg)
+		}
+
 		if m.confirmModalOpen {
 			return m.updateConfirmModal(msg)
 		}
@@ -345,6 +366,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Execute):
 			m.openConfirm("Start executing", domain.StatusInProgress, domain.StatusTodo, domain.StatusPlanned)
 			return m, nil
+
+		case key.Matches(msg, keys.Input):
+			return m, m.openInputModal()
 
 		case key.Matches(msg, keys.Review):
 			if t, ok := m.tasklist.Selected(); ok {
@@ -575,6 +599,65 @@ func (m Model) updateCompleteModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.completeInput, cmd = m.completeInput.Update(msg)
 	return m, cmd
+}
+
+// openInputModal stages a free-form message to send to the selected task's
+// claude session — only eligible for PLANNED or READY_FOR_REVIEW tasks, the
+// two "stopped and waiting on a person" states outside of Review's revdiff
+// annotation flow.
+func (m *Model) openInputModal() tea.Cmd {
+	t, ok := m.tasklist.Selected()
+	if !ok || (t.Status != domain.StatusPlanned && t.Status != domain.StatusReadyForReview) {
+		return nil
+	}
+	m.inputTaskID = t.ID
+	m.inputTextarea.Reset()
+	m.inputModalOpen = true
+	return m.inputTextarea.Focus()
+}
+
+// updateInputModal handles input while the message textarea is open: esc
+// cancels without sending anything, ctrl+s sends the message (resuming the
+// task's session) and closes the modal, everything else is forwarded to the
+// textarea itself — enter included, so it inserts a newline rather than
+// submitting, since a prompt is often more than one line.
+func (m Model) updateInputModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.inputModalOpen = false
+		m.inputTextarea.Blur()
+		return m, nil
+	case tea.KeyCtrlS:
+		message := strings.TrimSpace(m.inputTextarea.Value())
+		m.inputModalOpen = false
+		m.inputTextarea.Blur()
+		if message == "" {
+			return m, nil
+		}
+		cmd := m.sendInputPrompt(message)
+		return m, cmd
+	}
+	var cmd tea.Cmd
+	m.inputTextarea, cmd = m.inputTextarea.Update(msg)
+	return m, cmd
+}
+
+// sendInputPrompt resumes the task openInputModal staged (by ID, same
+// resolve-once pattern as startCompleteTask) with a free-form user message —
+// a Plan-mode resume for a PLANNED task, or a Complete-mode resume in its
+// existing worktree for a READY_FOR_REVIEW task.
+func (m *Model) sendInputPrompt(message string) tea.Cmd {
+	for _, t := range m.tasks {
+		if t.ID != m.inputTaskID {
+			continue
+		}
+		m.appendLogLine(t.ID, logCormakeLine("sending message to claude"))
+		if t.Status == domain.StatusReadyForReview {
+			return m.runExecuteAgent(t, message+executeSummaryInstruction, t.SessionID)
+		}
+		return m.runPlanAgent(t, message, t.SessionID)
+	}
+	return nil
 }
 
 // startCompleteTask kicks off finalizing the task openCompleteModal staged
@@ -1630,6 +1713,10 @@ func (m Model) View() string {
 		return m.renderCompleteModal()
 	}
 
+	if m.inputModalOpen {
+		return m.renderInputModal()
+	}
+
 	if m.confirmModalOpen {
 		return m.renderConfirmModal()
 	}
@@ -1727,6 +1814,18 @@ func (m Model) renderCompleteModal() string {
 		"Commit changes and finalize onto branch:", "",
 		m.completeInput.View(), "",
 		tabInfoStyle.Render("[enter] complete   [esc] cancel"),
+	}
+	box := focusedPaneBorderStyle().Padding(1, 3).Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// renderInputModal draws the free-form message textarea, centered over the
+// full screen.
+func (m Model) renderInputModal() string {
+	lines := []string{
+		"Send a message to claude", "",
+		m.inputTextarea.View(), "",
+		tabInfoStyle.Render("[ctrl+s] send   [esc] cancel"),
 	}
 	box := focusedPaneBorderStyle().Padding(1, 3).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)

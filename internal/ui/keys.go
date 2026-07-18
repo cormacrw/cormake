@@ -51,6 +51,13 @@ type KeyMap struct {
 	// exits, resuming whichever session (plan or execute) produced them.
 	Review key.Binding
 
+	// Input opens a free-form textarea prompt for a PLANNED or
+	// READY_FOR_REVIEW task, sent to claude as a follow-up message that
+	// resumes whichever session (plan or execute) produced that state —
+	// a lighter-weight alternative to Review for when there's nothing to
+	// annotate on the artifact itself, just something to say.
+	Input key.Binding
+
 	// Switch which tab the detail pane's content area shows. 1/2/3/4 are
 	// fixed slots (Description/Plan/Summary/Log) regardless of whether
 	// Plan/Summary is applicable to the current task, so they don't shift
@@ -89,6 +96,7 @@ var keys = KeyMap{
 	Plan:    key.NewBinding(key.WithKeys("p")),
 	Execute: key.NewBinding(key.WithKeys("e")),
 	Review:  key.NewBinding(key.WithKeys("r")),
+	Input:   key.NewBinding(key.WithKeys("i")),
 
 	TabDescription: key.NewBinding(key.WithKeys("1")),
 	TabPlan:        key.NewBinding(key.WithKeys("2")),
@@ -102,4 +110,4 @@ var keys = KeyMap{
 	Help:    key.NewBinding(key.WithKeys("?")),
 }
 
-const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [r]eview [m]ark complete [a]rchive [d]elete [w]orkspaces tabs:1-4/[/] arrows:scroll [?]help [q]uit"
+const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [r]eview [i]nput [m]ark complete [a]rchive [d]elete [w]orkspaces tabs:1-4/[/] arrows:scroll [?]help [q]uit"
