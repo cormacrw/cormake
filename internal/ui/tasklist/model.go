@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
 
 	"cormake/internal/domain"
 )
@@ -32,18 +33,45 @@ func (i Item) FilterValue() string {
 
 type Model struct {
 	List list.Model
+
+	spinner spinner.Model
+
+	// frame holds the shared spinner's current rendered frame, refreshed by
+	// UpdateSpinner and read by Delegate.Render for PLANNING/IN_PROGRESS
+	// rows — a pointer rather than a plain field so the Delegate value
+	// handed to list.Model at construction time keeps seeing later updates.
+	frame *string
 }
 
 func New(tasks []domain.Task) Model {
-	l := list.New(toItems(tasks), Delegate{}, 0, 0)
+	s := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	frame := new(string)
+	*frame = s.View()
+
+	l := list.New(toItems(tasks), Delegate{Frame: frame}, 0, 0)
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false)
 	l.DisableQuitKeybindings()
-	m := Model{List: l}
+	m := Model{List: l, spinner: s, frame: frame}
 	m.skipHeader(0)
 	return m
+}
+
+// SpinnerTick starts (or resumes) the shared in-flight-agent spinner.
+func (m Model) SpinnerTick() tea.Cmd {
+	return m.spinner.Tick
+}
+
+// UpdateSpinner advances the shared spinner in response to a
+// spinner.TickMsg and refreshes the frame Delegate.Render reads for
+// PLANNING/IN_PROGRESS rows.
+func (m *Model) UpdateSpinner(msg tea.Msg) tea.Cmd {
+	var cmd tea.Cmd
+	m.spinner, cmd = m.spinner.Update(msg)
+	*m.frame = m.spinner.View()
+	return cmd
 }
 
 // toItems splits tasks into two sections — planned/ready-for-review at the

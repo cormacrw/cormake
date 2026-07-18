@@ -66,6 +66,25 @@ func TestSetTasksSelectsFirstRealTask(t *testing.T) {
 	}
 }
 
+func TestSpinnerTickAdvancesSharedFrame(t *testing.T) {
+	m := New(nil)
+	before := *m.frame
+
+	cmd := m.SpinnerTick()
+	if cmd == nil {
+		t.Fatal("SpinnerTick() returned a nil cmd")
+	}
+	msg := cmd()
+
+	if updateCmd := m.UpdateSpinner(msg); updateCmd == nil {
+		t.Fatal("UpdateSpinner returned a nil cmd, expected the chain to continue")
+	}
+
+	if *m.frame == before {
+		t.Fatalf("frame did not change after a spinner tick: got %q both before and after", before)
+	}
+}
+
 func TestUpdateSkipsHeaderRowOnCursorDown(t *testing.T) {
 	m := New([]domain.Task{
 		{ID: "planned", Status: domain.StatusPlanned},

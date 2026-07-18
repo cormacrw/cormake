@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"cormake/internal/domain"
 	"cormake/internal/ui/theme"
 )
 
@@ -22,7 +23,12 @@ func selectedRowStyle() lipgloss.Style {
 // Delegate renders each task as a single compact line: "<marker><title>" on
 // the left, its status glyph right-aligned (full stage name is left for the
 // detail pane; the list stays compact).
-type Delegate struct{}
+type Delegate struct {
+	// Frame is the shared spinner frame (see Model.frame), substituted for
+	// the static glyph on PLANNING/IN_PROGRESS rows so in-flight agents
+	// animate rather than sit on a frozen hourglass/pencil icon.
+	Frame *string
+}
 
 func (d Delegate) Height() int                               { return 1 }
 func (d Delegate) Spacing() int                              { return 0 }
@@ -45,6 +51,9 @@ func (d Delegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
 	}
 
 	_, glyph := ti.Task.DisplayStage()
+	if d.Frame != nil && (ti.Task.Status == domain.StatusPlanning || ti.Task.Status == domain.StatusInProgress) {
+		glyph = *d.Frame
+	}
 
 	titleWidth := m.Width() - lipgloss.Width(marker) - lipgloss.Width(glyph) - 1
 	title := truncate(ti.Task.Title, titleWidth)

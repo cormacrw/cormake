@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -111,6 +112,13 @@ type Model struct {
 	runner   agent.Runner
 	eventsCh chan tea.Msg
 	active   map[string]*agent.Handle
+
+	// spinnerTicking tracks whether the shared in-flight-agent spinner (see
+	// tasklist.Model.SpinnerTick) is currently animating — the
+	// spinner.TickMsg chain is self-perpetuating once started (see the
+	// spinner package), so this flag is what lets it stop cleanly once
+	// active is empty and restart on demand rather than ticking forever.
+	spinnerTicking bool
 
 	// resultSeen tracks, per task ID, whether an EventResult has been
 	// observed for its current run — the primary signal handleTaskFinished
@@ -237,6 +245,19 @@ func waitForEvent(ch <-chan tea.Msg) tea.Cmd {
 	return func() tea.Msg { return <-ch }
 }
 
+// ensureSpinnerTicking (re)starts the shared in-flight-agent spinner if it
+// isn't already animating — called from every place that adds to m.active
+// (runPlanAgent, runExecuteAgent, reconnectTask). The spinner.TickMsg case
+// in Update is what stops the chain once active empties out, so this is
+// the only place that needs to kick it back off.
+func (m *Model) ensureSpinnerTicking() tea.Cmd {
+	if m.spinnerTicking || len(m.active) == 0 {
+		return nil
+	}
+	m.spinnerTicking = true
+	return m.tasklist.SpinnerTick()
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -270,8 +291,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForEvent(m.eventsCh)
 
 	case reconnectTaskMsg:
-		m.reconnectTask(msg.TaskID)
-		return m, nil
+		return m, m.reconnectTask(msg.TaskID)
+
+	case spinner.TickMsg:
+		cmd := m.tasklist.UpdateSpinner(msg)
+		if len(m.active) == 0 {
+			// Nothing left in flight — drop the tick chain instead of
+			// feeding it another cmd, so it stops rather than spinning
+			// forever in the background.
+			m.spinnerTicking = false
+			return m, nil
+		}
+		return m, cmd
 
 	case dashboardWorktreesMsg:
 		m.dashboardWorktrees = msg.rows
@@ -1066,7 +1097,7 @@ func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.
 	m.active[t.ID] = handle
 	go forwardEvents(m.eventsCh, t.ID, handle)
 
-	return nil
+	return m.ensureSpinnerTicking()
 }
 
 // startExecuteRun spawns a fresh real claude Complete-mode run for the
@@ -1180,7 +1211,7 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 	m.active[t.ID] = handle
 	go forwardEvents(m.eventsCh, t.ID, handle)
 
-	return nil
+	return m.ensureSpinnerTicking()
 }
 
 // gitHeadRef resolves repoPath's current HEAD commit — best-effort, since
@@ -1499,7 +1530,7 @@ var reconnectExecutePrompt = "cormake was restarted and is reconnecting to this 
 //     existed with no PID on record at all). Fall back to the previous
 //     behavior: respawn via runPlanAgent/runExecuteAgent with --resume,
 //     picking the session back up from claude's own persisted transcript.
-func (m *Model) reconnectTask(taskID string) {
+func (m *Model) reconnectTask(taskID string) tea.Cmd {
 	var t domain.Task
 	found := false
 	for _, task := range m.tasks {
@@ -1510,7 +1541,7 @@ func (m *Model) reconnectTask(taskID string) {
 		}
 	}
 	if !found || t.SessionID == "" {
-		return
+		return nil
 	}
 
 	if t.PID != 0 && claude.ProcessAlive(t.PID) {
@@ -1529,7 +1560,7 @@ func (m *Model) reconnectTask(taskID string) {
 			m.appendLogLine(t.ID, logCormakeLine(fmt.Sprintf("cormake restarted — reattaching to still-running session (pid %d)", t.PID)))
 			m.active[t.ID] = handle
 			go forwardEvents(m.eventsCh, t.ID, handle)
-			return
+			return m.ensureSpinnerTicking()
 		}
 		fmt.Fprintln(os.Stderr, "cormake: failed to attach to pid", t.PID, "for", t.ID+":", err)
 	}
@@ -1548,21 +1579,22 @@ func (m *Model) reconnectTask(taskID string) {
 	if m.resultSeen[t.ID] {
 		m.appendLogLine(t.ID, logCormakeLine("cormake restarted — the run had already finished"))
 		m.handleTaskFinished(taskFinishedMsg{TaskID: t.ID})
-		return
+		return nil
 	}
 
 	m.appendLogLine(t.ID, logCormakeLine("cormake restarted — reconnecting to interrupted session"))
 
 	switch t.Status {
 	case domain.StatusPlanning:
-		m.runPlanAgent(t, reconnectPlanPrompt, t.SessionID)
+		return m.runPlanAgent(t, reconnectPlanPrompt, t.SessionID)
 	case domain.StatusInProgress:
 		if t.WorktreePath == "" {
 			m.appendLogLine(t.ID, logCormakeLine("cannot reconnect — task has no worktree on record"))
-			return
+			return nil
 		}
-		m.runExecuteAgent(t, reconnectExecutePrompt, t.SessionID)
+		return m.runExecuteAgent(t, reconnectExecutePrompt, t.SessionID)
 	}
+	return nil
 }
 
 // setWorkspace sets the active workspace by index and refreshes the task
