@@ -170,7 +170,9 @@ func (m *Model) ShowLog() {
 }
 
 // syncViewportContent loads whichever tab is active into the shared
-// viewport and scrolls back to the top.
+// viewport. The Log tab opens scrolled to the bottom (tail -f style, so the
+// most recent Claude output is visible immediately); other tabs scroll back
+// to the top.
 func (m *Model) syncViewportContent() {
 	switch m.activeTab {
 	case TabPlan:
@@ -182,7 +184,11 @@ func (m *Model) syncViewportContent() {
 	default:
 		m.Viewport.SetContent(m.renderedDescription)
 	}
-	m.Viewport.SetYOffset(0)
+	if m.activeTab == TabLog {
+		m.Viewport.GotoBottom()
+	} else {
+		m.Viewport.SetYOffset(0)
+	}
 }
 
 // renderLog joins a task's stored log lines and wraps the result to the
