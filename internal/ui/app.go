@@ -259,7 +259,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
 
-		case key.Matches(msg, keys.PgUp, keys.PgDown):
+		case key.Matches(msg, keys.PgUp, keys.PgDown, keys.Scroll):
 			cmd := m.detail.Scroll(msg)
 			return m, cmd
 

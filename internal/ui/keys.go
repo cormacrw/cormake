@@ -13,6 +13,12 @@ type KeyMap struct {
 	PgDown key.Binding
 	Quit   key.Binding
 
+	// Scroll covers the bare arrow keys, forwarded straight to the detail
+	// pane's content viewport. Arrow keys are reserved for scrolling only —
+	// list navigation and the Open/Archived switch use their vim-key
+	// equivalents (k/j/h/l) instead, so a key never does double duty.
+	Scroll key.Binding
+
 	// Archive parks a TODO or READY_FOR_REVIEW task out of the active view
 	// (or restores one already archived) — not a finished outcome, just set
 	// aside. See Complete below for actually finishing a task's work.
@@ -63,13 +69,15 @@ type KeyMap struct {
 }
 
 var keys = KeyMap{
-	Up:     key.NewBinding(key.WithKeys("up", "k")),
-	Down:   key.NewBinding(key.WithKeys("down", "j")),
-	Left:   key.NewBinding(key.WithKeys("left", "h")),
-	Right:  key.NewBinding(key.WithKeys("right", "l")),
+	Up:     key.NewBinding(key.WithKeys("k")),
+	Down:   key.NewBinding(key.WithKeys("j")),
+	Left:   key.NewBinding(key.WithKeys("h")),
+	Right:  key.NewBinding(key.WithKeys("l")),
 	PgUp:   key.NewBinding(key.WithKeys("pgup", "ctrl+u")),
 	PgDown: key.NewBinding(key.WithKeys("pgdown", "ctrl+d")),
 	Quit:   key.NewBinding(key.WithKeys("q")),
+
+	Scroll: key.NewBinding(key.WithKeys("up", "down", "left", "right")),
 
 	Archive:  key.NewBinding(key.WithKeys("a")),
 	Delete:   key.NewBinding(key.WithKeys("d")),
@@ -94,4 +102,4 @@ var keys = KeyMap{
 	Help:    key.NewBinding(key.WithKeys("?")),
 }
 
-const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [r]eview [m]ark complete [a]rchive [d]elete [w]orkspaces tabs:1-4/[/] [?]help [q]uit"
+const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [r]eview [m]ark complete [a]rchive [d]elete [w]orkspaces tabs:1-4/[/] arrows:scroll [?]help [q]uit"
