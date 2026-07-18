@@ -873,6 +873,23 @@ func (m *Model) startPlanRun() tea.Cmd {
 	return m.runPlanAgent(t, buildPrompt(t), "")
 }
 
+// activeAgentCount returns how many of workspaceID's tasks currently have a
+// running agent handle — the enforcement point for each workspace's
+// EffectiveMaxConcurrentAgents cap, checked by runPlanAgent/runExecuteAgent
+// before spawning another one.
+func (m *Model) activeAgentCount(workspaceID string) int {
+	n := 0
+	for _, t := range m.tasks {
+		if t.WorkspaceID != workspaceID {
+			continue
+		}
+		if _, ok := m.active[t.ID]; ok {
+			n++
+		}
+	}
+	return n
+}
+
 // runPlanAgent spawns a plan-mode claude run for t with the given prompt,
 // shared by the initial Plan action and the revise-after-review-feedback
 // flow (see revdiff.go). resumeSessionID, when non-empty, continues t's
@@ -882,6 +899,10 @@ func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.
 	repoPath, ok := m.repoPath(t.RepoID)
 	if !ok || repoPath == "" {
 		m.appendLogLine(t.ID, logCormakeLine("cannot start — task has no repo assigned"))
+		return nil
+	}
+	if limit := m.workspaces[m.activeWS].EffectiveMaxConcurrentAgents(); m.activeAgentCount(t.WorkspaceID) >= limit {
+		m.appendLogLine(t.ID, logCormakeLine(fmt.Sprintf("cannot start — workspace agent limit reached (%d running)", limit)))
 		return nil
 	}
 
@@ -959,6 +980,10 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 	repoPath, ok := m.repoPath(t.RepoID)
 	if !ok || repoPath == "" {
 		m.appendLogLine(t.ID, logCormakeLine("cannot start — task has no repo assigned"))
+		return nil
+	}
+	if limit := m.workspaces[m.activeWS].EffectiveMaxConcurrentAgents(); m.activeAgentCount(t.WorkspaceID) >= limit {
+		m.appendLogLine(t.ID, logCormakeLine(fmt.Sprintf("cannot start — workspace agent limit reached (%d running)", limit)))
 		return nil
 	}
 

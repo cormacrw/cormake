@@ -28,9 +28,39 @@ All state — workspaces, repos, tasks, session transcripts — is stored as fla
 
 ## Concepts
 
-- **Workspace** — a named grouping of git repos plus the tasks created against them. A default workspace is created on first run but starts empty. Each workspace has its own readable-id `Prefix` (e.g. `ACME`, hand-set by editing `workspaces.json`; auto-derived from the workspace name if unset) used to number its tasks.
+- **Workspace** — a named grouping of git repos plus the tasks created against them. A default workspace is created on first run but starts empty. See [Workspace config](#workspace-config) below for the hand-editable settings each workspace has (readable-id prefix, agent concurrency limit, etc).
 - **Repo** — a git repo added to a workspace; tasks created in that workspace pick one of its repos.
 - **Task** — has a title, description, workspace, repo, mode (`plan`/`execute`), and moves through a status lifecycle from creation to completion. Each task gets a short readable id from its workspace's prefix (e.g. `ACME-7`). Execute-mode tasks run in their own worktree at `<repo>/.claude/worktrees/<task-id>` (named after that readable id, lowercased, so the worktree/branch is easy to match back to the task), so nothing they do touches your main working copy until you merge it.
+
+## Workspace config
+
+There's no settings UI yet — per-workspace options are hand-edited directly in `~/.cormake/workspaces.json` (or `$CORMAKE_HOME/workspaces.json`) while cormake isn't running. Example entry showing every option:
+
+```json
+{
+  "ID": "3f1b2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  "Name": "acme",
+  "Repos": [
+    {
+      "ID": "9a8b7c6d-5e4f-3a2b-1c0d-9e8f7a6b5c4d",
+      "Name": "acme-api",
+      "Path": "/Users/you/code/acme-api",
+      "AddedAt": "2026-01-05T10:00:00Z"
+    }
+  ],
+  "PrimaryColor": "#ff8800",
+  "Prefix": "ACME",
+  "NextTaskNumber": 8,
+  "MaxConcurrentAgents": 3,
+  "CreatedAt": "2026-01-05T10:00:00Z",
+  "UpdatedAt": "2026-01-05T10:00:00Z"
+}
+```
+
+- `PrimaryColor` — accent color for this workspace's UI (hex string).
+- `Prefix` — readable-id prefix for its tasks, e.g. `ACME` -> `ACME-7`. Auto-derived from `Name` if unset.
+- `NextTaskNumber` — next sequence number `Prefix` will hand out; doesn't reset when `Prefix` is edited by hand.
+- `MaxConcurrentAgents` — caps how many Plan/Execute agents can run at once across this workspace's tasks. `0` (or omitted) means "unset" and falls back to a default of `1`, not "unlimited" — raise it deliberately if you want more agents running in parallel.
 
 ## Keybindings
 
