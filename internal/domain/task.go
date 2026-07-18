@@ -114,8 +114,19 @@ type Task struct {
 	PlanFilePath string
 
 	ResultSummary string
-	Cost          float64
-	ErrorMessage  string
+
+	// Cost and the token counts below accumulate across every agent run
+	// this task has had — planning, execution, and any resumed
+	// review-feedback round trips (see ui.handleAgentEvent) — rather than
+	// holding just the most recent run's numbers, so the summary reflects
+	// the task's full spend, not only its last leg.
+	Cost                     float64
+	InputTokens              int64
+	OutputTokens             int64
+	CacheReadInputTokens     int64
+	CacheCreationInputTokens int64
+
+	ErrorMessage string
 
 	// Reserved for a future MCP-based import from tools like ClickUp/Jira.
 	// Defaults to "manual" and stays unpopulated until that importer exists.

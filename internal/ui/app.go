@@ -1389,7 +1389,16 @@ func (m *Model) handleAgentEvent(ev agent.Event) {
 		for i := range m.tasks {
 			if m.tasks[i].ID == ev.TaskID {
 				m.tasks[i].ResultSummary = ev.ResultText
-				m.tasks[i].Cost = ev.CostUSD
+				// Accumulate rather than overwrite: a task can go through
+				// several runs (plan, execute, resumed review-feedback
+				// rounds), each reporting its own EventResult, and the
+				// summary should reflect the task's total spend across all
+				// of them, not just whichever run finished last.
+				m.tasks[i].Cost += ev.CostUSD
+				m.tasks[i].InputTokens += ev.InputTokens
+				m.tasks[i].OutputTokens += ev.OutputTokens
+				m.tasks[i].CacheReadInputTokens += ev.CacheReadInputTokens
+				m.tasks[i].CacheCreationInputTokens += ev.CacheCreationInputTokens
 				break
 			}
 		}

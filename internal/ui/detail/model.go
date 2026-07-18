@@ -313,9 +313,40 @@ func (m *Model) refreshRendered() {
 		m.renderedPlan = ""
 	}
 	if m.HasSummary() {
-		m.renderedSummary = renderMarkdown(m.task.ResultSummary, m.width, "_no summary_")
+		usage := metaStyle.Render(formatUsageLine(m.task))
+		divider := dividerStyle.Render(strings.Repeat("─", max0(m.width)))
+		m.renderedSummary = strings.Join([]string{usage, divider, ""}, "\n") +
+			renderMarkdown(m.task.ResultSummary, m.width, "_no summary_")
 	} else {
 		m.renderedSummary = ""
+	}
+}
+
+// formatUsageLine renders the task's total cost and token usage — accrued
+// across every run the task has had (plan, execute, and any resumed
+// review-feedback round trips; see ui.handleAgentEvent) rather than just the
+// run that produced the summary text below it, so it reads as the task's
+// full spend rather than only its last leg.
+func formatUsageLine(t domain.Task) string {
+	total := t.InputTokens + t.OutputTokens + t.CacheReadInputTokens + t.CacheCreationInputTokens
+	return fmt.Sprintf(
+		"Cost: $%.4f   Tokens: %s total (%s in, %s out, %s cache write, %s cache read)",
+		t.Cost, formatTokenCount(total), formatTokenCount(t.InputTokens), formatTokenCount(t.OutputTokens),
+		formatTokenCount(t.CacheCreationInputTokens), formatTokenCount(t.CacheReadInputTokens),
+	)
+}
+
+// formatTokenCount abbreviates n to a "1.2k"/"3.4M"-style count — token
+// totals routinely run into the tens of thousands (cache reads especially),
+// and a bare digit string that long is harder to scan than a short one.
+func formatTokenCount(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
 	}
 }
 

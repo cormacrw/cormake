@@ -48,6 +48,12 @@ type rawResult struct {
 	TotalCostUSD float64 `json:"total_cost_usd"`
 	SessionID    string  `json:"session_id"`
 	IsError      bool    `json:"is_error"`
+	Usage        struct {
+		InputTokens              int64 `json:"input_tokens"`
+		OutputTokens             int64 `json:"output_tokens"`
+		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	} `json:"usage"`
 }
 
 // translateLine parses one stream-json line into zero or more
@@ -118,6 +124,10 @@ func translateLine(taskID string, line []byte) []agent.Event {
 		return []agent.Event{{
 			TaskID: taskID, Type: agent.EventResult,
 			ResultText: res.Result, CostUSD: res.TotalCostUSD, SessionID: res.SessionID,
+			InputTokens:              res.Usage.InputTokens,
+			OutputTokens:             res.Usage.OutputTokens,
+			CacheReadInputTokens:     res.Usage.CacheReadInputTokens,
+			CacheCreationInputTokens: res.Usage.CacheCreationInputTokens,
 		}}
 
 	default:

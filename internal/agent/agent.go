@@ -115,8 +115,20 @@ type Event struct {
 
 	ResultText string
 	CostUSD    float64
-	SessionID  string
-	Cwd        string // set on EventInit; the process's actual working directory (a worktree path, for Complete-mode runs)
+
+	// Token counts from the result's usage block, set only on EventResult.
+	// CacheReadInputTokens/CacheCreationInputTokens are broken out from
+	// InputTokens (rather than folded in) since they're billed at different
+	// rates and cache reads dominate turn count on a resumed session —
+	// collapsing them would make cache-heavy runs look far pricier than
+	// their total_cost_usd actually reflects.
+	InputTokens              int64
+	OutputTokens             int64
+	CacheReadInputTokens     int64
+	CacheCreationInputTokens int64
+
+	SessionID string
+	Cwd       string // set on EventInit; the process's actual working directory (a worktree path, for Complete-mode runs)
 
 	// Offset is set only on events derived from the raw stdout tail (0/unused
 	// for EventStderrLine/EventProcessError): the byte position in the raw
