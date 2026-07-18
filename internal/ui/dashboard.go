@@ -95,7 +95,7 @@ func (m Model) updateDashboardFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.openWorkspacePicker()
 		return m, nil
 	case key.Matches(msg, keys.NewTask):
-		return m, m.openNewTaskModal()
+		return m, m.openNewTaskWizard()
 	}
 	return m, nil
 }

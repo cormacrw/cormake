@@ -45,8 +45,17 @@ type Model struct {
 	workspaceModalOpen bool
 	workspaceCursor    int
 
-	newTaskModalOpen bool
-	newTaskInput     textinput.Model
+	// wizard is non-nil while the New Task wizard (see newtask.go) is open —
+	// title, repo, target branch, source branch, then a recap confirmation.
+	wizard *newTaskWizard
+
+	// branchPickerOpen/branchPicker/branchPickerKind/branchPickerTaskID
+	// stage the standalone change-target/change-source-branch shortcuts
+	// (see branchmodal.go), independent of the wizard above.
+	branchPickerOpen   bool
+	branchPicker       *branchPicker
+	branchPickerKind   branchPickerKind
+	branchPickerTaskID string
 
 	completeModalOpen bool
 	completeInput     textinput.Model
@@ -173,11 +182,6 @@ func New(st *store.Store) (Model, error) {
 		}
 	}
 
-	ti := textinput.New()
-	ti.Placeholder = "task title"
-	ti.CharLimit = 200
-	ti.Width = 40
-
 	ci := textinput.New()
 	ci.Placeholder = "feature branch name"
 	ci.CharLimit = 200
@@ -197,7 +201,6 @@ func New(st *store.Store) (Model, error) {
 		repoNames:     repoNames,
 		tasklist:      tasklist.New(nil),
 		detail:        detail.New(logs),
-		newTaskInput:  ti,
 		completeInput: ci,
 		inputTextarea: ta,
 		runner:        claude.Client{},
@@ -278,13 +281,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
+	}
 
+	// The New Task wizard and the standalone branch-picker modals wrap huh
+	// forms, which advance fields/groups via their own internal follow-up
+	// messages (nextFieldMsg, nextGroupMsg, etc.) returned as tea.Cmds from
+	// a field's Update — not delivered synchronously, but as a plain
+	// tea.Msg on some later call to this function. Unlike every other
+	// modal below (all hand-rolled against bubbles widgets that resolve
+	// within a single tea.KeyMsg), these two need every message type
+	// routed to them while open, not just key presses, or that follow-up
+	// message would fall through to the tasklist update at the bottom of
+	// this function and the form would silently stop advancing.
+	if m.wizard != nil {
+		return m.updateNewTaskWizard(msg)
+	}
+	if m.branchPickerOpen {
+		return m.updateBranchPickerModal(msg)
+	}
+
+	if msg, ok := msg.(tea.KeyMsg); ok {
 		if m.workspaceModalOpen {
 			return m.updateWorkspaceModal(msg)
-		}
-
-		if m.newTaskModalOpen {
-			return m.updateNewTaskModal(msg)
 		}
 
 		if m.completeModalOpen {
@@ -357,7 +375,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case key.Matches(msg, keys.NewTask):
-			return m, m.openNewTaskModal()
+			return m, m.openNewTaskWizard()
+
+		case key.Matches(msg, keys.ChangeTargetBranch):
+			return m, m.openBranchPickerModal(branchPickerKindTarget)
+
+		case key.Matches(msg, keys.ChangeSourceBranch):
+			return m, m.openBranchPickerModal(branchPickerKindSource)
 
 		case key.Matches(msg, keys.Plan):
 			m.openConfirm("Start planning", domain.StatusPlanning, domain.StatusTodo)
@@ -540,14 +564,6 @@ func (m *Model) openWorkspacePicker() {
 	m.workspaceModalOpen = true
 }
 
-// openNewTaskModal opens the new-task title prompt. Shared by the normal
-// keymap and updateDashboardFocus, same reasoning as openWorkspacePicker.
-func (m *Model) openNewTaskModal() tea.Cmd {
-	m.newTaskInput.SetValue("")
-	m.newTaskModalOpen = true
-	return m.newTaskInput.Focus()
-}
-
 // openDeleteConfirm stages deleting the selected task behind a confirmation
 // modal. Unlike Plan/Execute there's no Status eligibility check — a task
 // can be deleted no matter what stage it's in, the confirmation itself is
@@ -712,30 +728,15 @@ func (m *Model) handleCompleteFinished(msg completeFinishedMsg) {
 }
 
 // suggestBranchName derives a starting-point feature-branch name from a
-// task's title — lowercased, non-alphanumeric runs collapsed to a single
-// "-". Just a default shown in the complete modal's input; the user can
-// freely edit it before confirming.
+// task's title (see slugify). Just a default shown in the complete modal's
+// input; the user can freely edit it before confirming. Distinct from
+// suggestTargetBranchName's "task/" prefix (branches.go) — this names the
+// finished-work branch a task lands on at Complete time, not the in-progress
+// working branch it started from.
 func suggestBranchName(t domain.Task) string {
-	var b strings.Builder
-	lastDash := false
-	for _, r := range strings.ToLower(t.Title) {
-		switch {
-		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
-			b.WriteRune(r)
-			lastDash = false
-		default:
-			if !lastDash && b.Len() > 0 {
-				b.WriteByte('-')
-				lastDash = true
-			}
-		}
-	}
-	name := strings.TrimRight(b.String(), "-")
+	name := slugify(t.Title)
 	if name == "" {
 		name = shortTaskID(t.ID)
-	}
-	if len(name) > 50 {
-		name = strings.TrimRight(name[:50], "-")
 	}
 	return "feature/" + name
 }
@@ -767,51 +768,28 @@ func (m Model) updateConfirmModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// updateNewTaskModal handles input while the new-task title prompt is open:
-// enter creates the task (if the title isn't blank) and closes the modal,
-// esc closes it without creating anything, everything else is forwarded to
-// the text input.
-func (m Model) updateNewTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.newTaskModalOpen = false
-		m.newTaskInput.Blur()
-		return m, nil
-	case "enter":
-		title := strings.TrimSpace(m.newTaskInput.Value())
-		m.newTaskModalOpen = false
-		m.newTaskInput.Blur()
-		if title != "" {
-			m.createTask(title)
-		}
-		return m, nil
-	}
-	var cmd tea.Cmd
-	m.newTaskInput, cmd = m.newTaskInput.Update(msg)
-	return m, cmd
-}
-
-// createTask adds a new TODO task to the active workspace with just a
-// title, defaulting to the workspace's first repo if it has one (there's
-// no repo picker yet). The description gets filled in later via the
-// [enter] edit-in-editor flow.
-func (m *Model) createTask(title string) {
+// createTask adds a new TODO task to the active workspace. repoID,
+// targetBranch, and sourceBranch come from the new-task wizard (see
+// newtask.go) — any of them may be empty (e.g. a workspace with no repos
+// configured yet skips straight past those wizard steps). The description
+// gets filled in later via the [enter] edit-in-editor flow.
+func (m *Model) createTask(title, repoID, targetBranch, sourceBranch string) {
 	if len(m.workspaces) == 0 {
 		return
 	}
 	ws := &m.workspaces[m.activeWS]
 	t := domain.Task{
-		ID:          uuid.NewString(),
-		DisplayID:   ws.NextDisplayID(),
-		WorkspaceID: ws.ID,
-		Title:       title,
-		Status:      domain.StatusTodo,
-		Source:      "manual",
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-	}
-	if len(ws.Repos) > 0 {
-		t.RepoID = ws.Repos[0].ID
+		ID:           uuid.NewString(),
+		DisplayID:    ws.NextDisplayID(),
+		WorkspaceID:  ws.ID,
+		Title:        title,
+		Status:       domain.StatusTodo,
+		Source:       "manual",
+		RepoID:       repoID,
+		TargetBranch: targetBranch,
+		SourceBranch: sourceBranch,
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
 	}
 	m.tasks = append(m.tasks, t)
 	m.persistTask(t)
@@ -1128,14 +1106,27 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 
 	if sessionID == "" {
 		sessionID = uuid.NewString()
-		wtName = worktreeName(t)
-		baseRef = gitHeadRef(repoPath)
-		path, err := createWorktree(repoPath, wtName)
-		if err != nil {
-			m.appendLogLine(t.ID, logCormakeLine("failed to create worktree: "+err.Error()))
-			return nil
+		targetBranch := t.TargetBranch
+		if targetBranch == "" {
+			// Back-compat: tasks created before the target-branch wizard
+			// existed have no TargetBranch on record, so fall back to the
+			// old scheme of naming the branch after the task itself.
+			targetBranch = worktreeName(t)
 		}
-		worktreePath = path
+		wtName = targetBranch
+		baseRef = gitHeadRef(repoPath)
+
+		if existing, ok := findWorktreeForBranch(repoPath, targetBranch); ok {
+			m.appendLogLine(t.ID, logCormakeLine("reusing existing worktree already open on branch "+targetBranch))
+			worktreePath = existing
+		} else {
+			path, err := createWorktree(repoPath, targetBranch)
+			if err != nil {
+				m.appendLogLine(t.ID, logCormakeLine("failed to create worktree: "+err.Error()))
+				return nil
+			}
+			worktreePath = path
+		}
 	}
 	if worktreePath == "" {
 		m.appendLogLine(t.ID, logCormakeLine("cannot resume — task has no worktree"))
@@ -1705,8 +1696,12 @@ func (m Model) View() string {
 		return m.renderWorkspaceModal()
 	}
 
-	if m.newTaskModalOpen {
-		return m.renderNewTaskModal()
+	if m.wizard != nil {
+		return m.renderNewTaskWizard()
+	}
+
+	if m.branchPickerOpen {
+		return m.renderBranchPickerModal()
 	}
 
 	if m.completeModalOpen {
@@ -1794,18 +1789,6 @@ func swatchColor(c string) string {
 	return c
 }
 
-// renderNewTaskModal draws the new-task title prompt, centered over the
-// full screen.
-func (m Model) renderNewTaskModal() string {
-	lines := []string{
-		"New task", "",
-		m.newTaskInput.View(), "",
-		tabInfoStyle.Render("[enter] create   [esc] cancel"),
-	}
-	box := focusedPaneBorderStyle().Padding(1, 3).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
-}
-
 // renderCompleteModal draws the mark-complete branch-name prompt, centered
 // over the full screen.
 func (m Model) renderCompleteModal() string {
@@ -1857,7 +1840,7 @@ func (m Model) renderBody() string {
 	leftTotal, rightTotal, contentHeight := m.paneDims()
 	cormakeContent, taskListContent := m.leftPaneHeights()
 
-	cormakePane := cormakeStyle.Width(leftTotal - paneOverhead).Height(cormakeContent).
+	cormakePane := cormakeStyle.Width(leftTotal-paneOverhead).Height(cormakeContent).
 		Align(lipgloss.Center, lipgloss.Center).Render(cormakeWordmark())
 	taskTabs := m.renderTaskTabs(leftTotal)
 	taskListPane := taskListStyle.Width(leftTotal - paneOverhead).Height(taskListContent).Render(m.tasklist.View())
