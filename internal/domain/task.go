@@ -105,6 +105,11 @@ type Task struct {
 	CreatedAt  time.Time
 	StartedAt  *time.Time
 	FinishedAt *time.Time
+
+	// UpdatedAt is bumped on every persisted change (see ui.persistTask) and
+	// used to order the task list's "everything else" section by
+	// most-recently-touched.
+	UpdatedAt time.Time
 }
 
 // Stage is the coarse, user-facing lifecycle label shown in the task list;

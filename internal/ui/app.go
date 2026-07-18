@@ -674,6 +674,7 @@ func (m *Model) createTask(title string) {
 		Status:      domain.StatusTodo,
 		Source:      "manual",
 		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
 	}
 	if len(ws.Repos) > 0 {
 		t.RepoID = ws.Repos[0].ID
@@ -689,8 +690,18 @@ func (m *Model) createTask(title string) {
 
 // persistTask saves t to disk, best-effort: there's no toast/error-banner
 // UI yet (future polish), so a failed save is logged to stderr rather than
-// crashing the TUI — a deliberate, temporary simplification.
+// crashing the TUI — a deliberate, temporary simplification. It also bumps
+// t.UpdatedAt to now and reflects that onto m.tasks, since every mutation
+// site routes through here — the task list's "everything else" section
+// sorts on this field (see refreshTaskList).
 func (m *Model) persistTask(t domain.Task) {
+	t.UpdatedAt = time.Now()
+	for i := range m.tasks {
+		if m.tasks[i].ID == t.ID {
+			m.tasks[i].UpdatedAt = t.UpdatedAt
+			break
+		}
+	}
 	if m.store == nil {
 		return
 	}

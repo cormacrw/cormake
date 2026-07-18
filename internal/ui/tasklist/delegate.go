@@ -13,6 +13,8 @@ import (
 
 var plainRowStyle = lipgloss.NewStyle()
 
+var headerRowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true)
+
 func selectedRowStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(theme.Accent()).Bold(true)
 }
@@ -29,6 +31,11 @@ func (d Delegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return nil }
 func (d Delegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
 	ti, ok := item.(Item)
 	if !ok {
+		return
+	}
+
+	if ti.Header {
+		fmt.Fprint(w, headerRowStyle.Render(truncate(ti.HeaderText, m.Width())))
 		return
 	}
 
