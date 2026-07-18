@@ -91,8 +91,10 @@ func (m *Model) SetSize(w, h int) {
 }
 
 // SetTask switches the displayed task, refreshing all tab content and
-// resetting to the Description tab — a predictable default rather than
-// carrying over whatever tab happened to be active for the last task.
+// keeping whichever tab is currently active — e.g. scrolling through the
+// task list while on the Log tab keeps showing each task's log — falling
+// back to Description only if the new task doesn't have that tab (no plan
+// or summary yet).
 // repoName is the resolved display name, since Task only stores a RepoID.
 // planContent is the plan file's content already read from disk, or empty
 // if the task has no plan yet.
@@ -101,9 +103,22 @@ func (m *Model) SetTask(t domain.Task, repoName, planContent string) {
 	m.task = t
 	m.repoName = repoName
 	m.planContent = planContent
-	m.activeTab = TabDescription
 	m.refreshRendered()
+	if !m.activeTabVisible() {
+		m.activeTab = TabDescription
+	}
 	m.syncViewportContent()
+}
+
+// activeTabVisible reports whether the currently active tab is still one of
+// the tabs visible for the (possibly just-switched-to) task.
+func (m Model) activeTabVisible() bool {
+	for _, t := range m.visibleTabs() {
+		if t == m.activeTab {
+			return true
+		}
+	}
+	return false
 }
 
 // SetEmpty replaces the normal task view with a centered message — used
