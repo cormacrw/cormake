@@ -118,6 +118,21 @@ func (m Model) Selected() (domain.Task, bool) {
 	return item.Task, true
 }
 
+// AtTop reports whether the selection is already on the first selectable
+// (non-header) row — used by the app shell to know when an "up" key press
+// should move focus out of the list entirely (into the CORMAKE dashboard
+// pane above it) rather than being swallowed here. An empty list counts as
+// "at top" too, so focus can still move up with no tasks in view.
+func (m Model) AtTop() bool {
+	idx := m.List.Index()
+	for i, item := range m.List.Items() {
+		if it, ok := item.(Item); ok && !it.Header {
+			return i == idx
+		}
+	}
+	return true
+}
+
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	before := m.List.Index()
 	var cmd tea.Cmd

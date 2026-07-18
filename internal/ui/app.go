@@ -63,6 +63,25 @@ type Model struct {
 	tasklist tasklist.Model
 	detail   detail.Model
 
+	// leftFocus tracks which of the two left-hand panes — the CORMAKE
+	// dashboard tile or the task list below it — is highlighted; that in
+	// turn decides whether the right pane shows the dashboard or the
+	// selected task's detail view. See updateDashboardFocus/renderBody.
+	leftFocus paneFocus
+
+	// sessionCostUSD accumulates ev.CostUSD across every EventResult seen
+	// since this cormake process started — there's no local way to query
+	// Anthropic's actual account-level usage/rate-limit remaining, so the
+	// dashboard's "Claude usage" card shows this real, locally-known number
+	// (spend by agents this process has run) rather than a fabricated quota.
+	sessionCostUSD float64
+
+	// dashboardWorktrees is the last-fetched snapshot of open worktrees and
+	// their current commit, refreshed (see fetchWorktreesCmd) each time
+	// leftFocus moves onto the dashboard pane rather than on every render,
+	// since it shells out to git per worktree.
+	dashboardWorktrees []worktreeRow
+
 	// runner is the agent backend — claude.Client today, but kept behind
 	// the agent.Runner interface so nothing here is claude-specific.
 	// eventsCh is the shared fan-in channel every running task's forwarding
@@ -234,6 +253,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reconnectTask(msg.TaskID)
 		return m, nil
 
+	case dashboardWorktreesMsg:
+		m.dashboardWorktrees = msg.rows
+		return m, nil
+
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
@@ -255,12 +278,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateConfirmModal(msg)
 		}
 
+		if m.leftFocus == leftFocusDashboard {
+			return m.updateDashboardFocus(msg)
+		}
+
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
 
 		case key.Matches(msg, keys.PgUp, keys.PgDown, keys.Scroll):
 			cmd := m.detail.Scroll(msg)
+			return m, cmd
+
+		case key.Matches(msg, keys.Up):
+			if m.tasklist.AtTop() {
+				m.leftFocus = leftFocusDashboard
+				return m, fetchWorktreesCmd(m.tasks)
+			}
+			var cmd tea.Cmd
+			m.tasklist, cmd = m.tasklist.Update(msg)
+			m.syncDetail()
 			return m, cmd
 
 		case key.Matches(msg, keys.Left):
@@ -295,14 +332,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case key.Matches(msg, keys.Workspaces):
-			m.workspaceCursor = m.activeWS
-			m.workspaceModalOpen = true
+			m.openWorkspacePicker()
 			return m, nil
 
 		case key.Matches(msg, keys.NewTask):
-			m.newTaskInput.SetValue("")
-			m.newTaskModalOpen = true
-			return m, m.newTaskInput.Focus()
+			return m, m.openNewTaskModal()
 
 		case key.Matches(msg, keys.Plan):
 			m.openConfirm("Start planning", domain.StatusPlanning, domain.StatusTodo)
@@ -471,6 +505,23 @@ func (m *Model) openConfirm(verb string, to domain.Status, allowedFrom ...domain
 	m.confirmKind = confirmKindTransition
 	m.confirmTo = to
 	m.confirmFrom = allowedFrom
+}
+
+// openWorkspacePicker opens the workspace-picker modal, resetting its cursor
+// onto the currently active workspace. Shared by the normal keymap and
+// updateDashboardFocus, since switching workspaces makes just as much sense
+// while the dashboard pane is focused as while the task list is.
+func (m *Model) openWorkspacePicker() {
+	m.workspaceCursor = m.activeWS
+	m.workspaceModalOpen = true
+}
+
+// openNewTaskModal opens the new-task title prompt. Shared by the normal
+// keymap and updateDashboardFocus, same reasoning as openWorkspacePicker.
+func (m *Model) openNewTaskModal() tea.Cmd {
+	m.newTaskInput.SetValue("")
+	m.newTaskModalOpen = true
+	return m.newTaskInput.Focus()
 }
 
 // openDeleteConfirm stages deleting the selected task behind a confirmation
@@ -1224,6 +1275,7 @@ func (m *Model) handleAgentEvent(ev agent.Event) {
 		}
 	case agent.EventResult:
 		m.resultSeen[ev.TaskID] = true
+		m.sessionCostUSD += ev.CostUSD
 		for i := range m.tasks {
 			if m.tasks[i].ID == ev.TaskID {
 				m.tasks[i].ResultSummary = ev.ResultText
@@ -1528,9 +1580,36 @@ func (m Model) paneDims() (leftTotal, rightTotal, contentHeight int) {
 	return leftTotal, rightTotal, contentHeight
 }
 
+// cormakePaneOuterHeight is the CORMAKE dashboard tile's fixed total
+// rendered height (border included) — just enough for one centered line of
+// wordmark text.
+const cormakePaneOuterHeight = 3
+
+// taskTabsHeight is the fixed single row the Open/Archived tabs occupy,
+// unbordered, between the CORMAKE tile and the task list (see
+// renderTaskTabs/renderBody).
+const taskTabsHeight = 1
+
+// leftPaneHeights splits the left column's total height (which otherwise
+// matches the right pane's single box exactly) between the CORMAKE tile,
+// the task tabs row, and the task list beneath them, returning the CORMAKE
+// tile's and task list's inner content heights (border excluded, ready for
+// Style.Height) — the tabs row itself is a fixed, unbordered single line.
+func (m Model) leftPaneHeights() (cormakeContent, taskListContent int) {
+	_, _, rightContentHeight := m.paneDims()
+	totalOuter := rightContentHeight + paneOverhead
+
+	taskListOuter := totalOuter - cormakePaneOuterHeight - taskTabsHeight
+	if taskListOuter < paneOverhead+1 {
+		taskListOuter = paneOverhead + 1
+	}
+	return cormakePaneOuterHeight - paneOverhead, taskListOuter - paneOverhead
+}
+
 func (m *Model) recalcLayout() {
 	leftTotal, rightTotal, contentHeight := m.paneDims()
-	m.tasklist.SetSize(leftTotal-paneOverhead, contentHeight)
+	_, taskListContent := m.leftPaneHeights()
+	m.tasklist.SetSize(leftTotal-paneOverhead, taskListContent)
 	m.detail.SetSize(rightTotal-paneOverhead, contentHeight)
 }
 
@@ -1555,7 +1634,7 @@ func (m Model) View() string {
 		return m.renderConfirmModal()
 	}
 
-	top := m.renderTabBar()
+	top := m.renderTopBar()
 	body := m.renderBody()
 	// Width/MaxWidth alone isn't enough: content wider than that still
 	// *wraps* onto a second line instead of getting cut off (confirmed by
@@ -1568,10 +1647,25 @@ func (m Model) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left, top, body, footer)
 }
 
-// renderTabBar renders the Open/Archived tabs on the left and the current
-// workspace name on the right; switching workspaces happens through the
-// [w] picker modal, not these tabs.
-func (m Model) renderTabBar() string {
+// renderTopBar renders the current workspace name, right-aligned across the
+// full width — the Open/Archived task tabs used to live here too, but now
+// sit under the CORMAKE tile instead (see renderTaskTabs), since they only
+// ever affect the task list beneath them, not the whole app.
+func (m Model) renderTopBar() string {
+	wsInfo := tabInfoStyle.Render("workspace: " + m.currentWorkspaceName())
+	gap := m.width - lipgloss.Width(wsInfo)
+	if gap < 0 {
+		gap = 0
+	}
+	bar := strings.Repeat(" ", gap) + wsInfo
+	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Height(1).MaxHeight(1).Render(bar)
+}
+
+// renderTaskTabs renders the Open/Archived tabs scoped to the left column's
+// width — placed between the CORMAKE tile and the task list (see
+// renderBody) since they only switch which tasks that list below them
+// shows.
+func (m Model) renderTaskTabs(width int) string {
 	open, archived := " Open ", " Archived "
 	if !m.showArchive {
 		open = activeTabStyle().Render("[Open]")
@@ -1581,15 +1675,7 @@ func (m Model) renderTabBar() string {
 		archived = activeTabStyle().Render("[Archived]")
 	}
 	tabs := " " + open + "  " + archived
-
-	wsInfo := tabInfoStyle.Render("workspace: " + m.currentWorkspaceName())
-
-	gap := m.width - lipgloss.Width(tabs) - lipgloss.Width(wsInfo)
-	if gap < 1 {
-		gap = 1
-	}
-	bar := tabs + strings.Repeat(" ", gap) + wsInfo
-	return lipgloss.NewStyle().Width(m.width).MaxWidth(m.width).Height(1).MaxHeight(1).Render(bar)
+	return lipgloss.NewStyle().Width(width).MaxWidth(width).Height(1).MaxHeight(1).Render(tabs)
 }
 
 // renderWorkspaceModal draws the workspace picker, centered over the full
@@ -1657,14 +1743,32 @@ func (m Model) renderConfirmModal() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
+// renderBody renders the three panes: the CORMAKE dashboard tile and the
+// task list stacked on the left, and — depending on which of those two has
+// focus (see leftFocus) — either the selected task's detail view or the
+// dashboard on the right.
 func (m Model) renderBody() string {
-	leftStyle := focusedPaneBorderStyle()
-	rightStyle := paneBorderStyle
+	cormakeStyle := paneBorderStyle
+	taskListStyle := focusedPaneBorderStyle()
+	if m.leftFocus == leftFocusDashboard {
+		cormakeStyle = focusedPaneBorderStyle()
+		taskListStyle = paneBorderStyle
+	}
 
 	leftTotal, rightTotal, contentHeight := m.paneDims()
+	cormakeContent, taskListContent := m.leftPaneHeights()
 
-	left := leftStyle.Width(leftTotal - paneOverhead).Height(contentHeight).Render(m.tasklist.View())
-	right := rightStyle.Width(rightTotal - paneOverhead).Height(contentHeight).Render(m.detail.View())
+	cormakePane := cormakeStyle.Width(leftTotal - paneOverhead).Height(cormakeContent).
+		Align(lipgloss.Center, lipgloss.Center).Render(cormakeWordmark())
+	taskTabs := m.renderTaskTabs(leftTotal)
+	taskListPane := taskListStyle.Width(leftTotal - paneOverhead).Height(taskListContent).Render(m.tasklist.View())
+	left := lipgloss.JoinVertical(lipgloss.Left, cormakePane, taskTabs, taskListPane)
+
+	rightContent := m.detail.View()
+	if m.leftFocus == leftFocusDashboard {
+		rightContent = m.renderDashboard(rightTotal-paneOverhead, contentHeight)
+	}
+	right := paneBorderStyle.Width(rightTotal - paneOverhead).Height(contentHeight).Render(rightContent)
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 }
