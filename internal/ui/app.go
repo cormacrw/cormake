@@ -793,8 +793,9 @@ func (m Model) updateNewTaskModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // createTask adds a new TODO task to the active workspace with just a
 // title, defaulting to the workspace's first repo if it has one (there's
-// no repo picker yet). The description gets filled in later via the
-// [enter] edit-in-editor flow.
+// no repo picker yet). The description defaults to the workspace's
+// TaskTemplate, if one is configured, and either way can be refined later
+// via the [enter] edit-in-editor flow.
 func (m *Model) createTask(title string) {
 	if len(m.workspaces) == 0 {
 		return
@@ -812,6 +813,11 @@ func (m *Model) createTask(title string) {
 	}
 	if len(ws.Repos) > 0 {
 		t.RepoID = ws.Repos[0].ID
+	}
+	if ws.TaskTemplate != "" {
+		if content, err := m.store.ReadTemplate(ws.TaskTemplate); err == nil {
+			t.Description = content
+		}
 	}
 	m.tasks = append(m.tasks, t)
 	m.persistTask(t)

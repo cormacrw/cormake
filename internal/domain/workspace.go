@@ -34,6 +34,13 @@ type Workspace struct {
 	// instead of suddenly allowing unbounded concurrent agent processes.
 	MaxConcurrentAgents int
 
+	// TaskTemplate names a markdown file, stored alongside workspaces.json
+	// in the store directory, whose contents prefill the Description of
+	// every new task created in this workspace (see Model.createTask).
+	// Hand-edited via workspaces.json, same as PrimaryColor/Prefix — empty
+	// means no template.
+	TaskTemplate string
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

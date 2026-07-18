@@ -45,6 +45,23 @@ func (s *Store) taskPath(id string) string {
 	return filepath.Join(s.dir, "tasks", id+".json")
 }
 
+// TemplatePath resolves a workspace's TaskTemplate filename against the
+// store directory — task templates live as plain markdown files next to
+// workspaces.json, not under tasks/ or logs/.
+func (s *Store) TemplatePath(name string) string {
+	return filepath.Join(s.dir, name)
+}
+
+// ReadTemplate loads the markdown content of a workspace task template.
+// name is resolved relative to the store directory (see TemplatePath).
+func (s *Store) ReadTemplate(name string) (string, error) {
+	data, err := os.ReadFile(s.TemplatePath(name))
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 // LoadWorkspaces reads workspaces.json. A missing file (first run) returns
 // (nil, nil) rather than an error, letting the caller decide to seed a
 // default workspace.
