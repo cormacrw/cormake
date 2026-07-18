@@ -8,6 +8,7 @@ package detail
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -226,7 +227,7 @@ func (m Model) renderHeader() string {
 	title := titleStyle.Render(truncate(m.task.Title, m.width-8)) + " #" + displayLabel(m.task)
 	// Workspace isn't shown here — the app's top bar already names the
 	// active workspace, so repeating it in every task's header is redundant.
-	metaText := fmt.Sprintf("repo: %s   %s %s", m.repoName, glyph, stage)
+	metaText := fmt.Sprintf("repo: %s   %s %s   created %s", m.repoName, glyph, stage, relativeTime(m.task.CreatedAt))
 	meta := metaStyle.Render(truncate(metaText, m.width))
 	tabBar := m.renderTabBar()
 	divider := dividerStyle.Render(strings.Repeat("─", max0(m.width)))
@@ -344,6 +345,40 @@ func shortID(id string) string {
 		return id[:4]
 	}
 	return id
+}
+
+// relativeTime renders t as a coarse "N unit(s) ago" string (or "just now"
+// for anything under a minute), matching the header's terse style rather
+// than a full timestamp.
+func relativeTime(t time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+	d := time.Since(t)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return plural(int(d/time.Minute), "minute") + " ago"
+	case d < 24*time.Hour:
+		return plural(int(d/time.Hour), "hour") + " ago"
+	case d < 30*24*time.Hour:
+		return plural(int(d/(24*time.Hour)), "day") + " ago"
+	case d < 365*24*time.Hour:
+		return plural(int(d/(30*24*time.Hour)), "month") + " ago"
+	default:
+		return plural(int(d/(365*24*time.Hour)), "year") + " ago"
+	}
+}
+
+func plural(n int, unit string) string {
+	if n == 1 {
+		return fmt.Sprintf("1 %s", unit)
+	}
+	return fmt.Sprintf("%d %ss", n, unit)
 }
 
 func max0(n int) int {
