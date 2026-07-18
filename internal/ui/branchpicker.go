@@ -39,6 +39,8 @@ type branchPicker struct {
 func newBranchPicker(title string, branches []string, allowNew bool, sentinelLabel, suggested, defaultBranch string) *branchPicker {
 	p := &branchPicker{value: suggested}
 
+	branches = branchesWithDefaultFirst(branches, defaultBranch)
+
 	options := make([]huh.Option[string], 0, len(branches)+1)
 	if allowNew {
 		options = append(options, huh.NewOption(sentinelLabel, newBranchSentinel))
@@ -61,6 +63,31 @@ func newBranchPicker(title string, branches []string, allowNew bool, sentinelLab
 
 func (p *branchPicker) Init() tea.Cmd {
 	return p.selectForm.Init()
+}
+
+// branchesWithDefaultFirst returns branches with defaultBranch moved to the
+// front, if present, so the option a picker preselects is also the first
+// one listed rather than wherever git's most-recently-committed ordering
+// happened to place it.
+func branchesWithDefaultFirst(branches []string, defaultBranch string) []string {
+	if defaultBranch == "" {
+		return branches
+	}
+	idx := -1
+	for i, b := range branches {
+		if b == defaultBranch {
+			idx = i
+			break
+		}
+	}
+	if idx <= 0 {
+		return branches
+	}
+	out := make([]string, 0, len(branches))
+	out = append(out, defaultBranch)
+	out = append(out, branches[:idx]...)
+	out = append(out, branches[idx+1:]...)
+	return out
 }
 
 func requireBranchName(s string) error {

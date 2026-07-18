@@ -3,8 +3,6 @@ package ui
 import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-
-	"cormake/internal/domain"
 )
 
 // branchPickerKind distinguishes which of a task's two branches a
@@ -40,14 +38,14 @@ func (m *Model) openBranchPickerModal(kind branchPickerKind) tea.Cmd {
 	case branchPickerKindTarget:
 		suggested := t.TargetBranch
 		if suggested == "" {
-			suggested = suggestTargetBranchName(t.Title)
+			suggested = suggestTargetBranchName(t.DisplayID)
 		}
 		picker = newBranchPicker("Target branch", branches, true,
 			"+ create new branch ("+suggested+")", suggested, t.TargetBranch)
 	case branchPickerKindSource:
 		def := t.SourceBranch
 		if def == "" {
-			def = domain.DefaultSourceBranch
+			def = m.workspaces[m.activeWS].EffectiveDefaultTargetBranch()
 		}
 		picker = newBranchPicker("Source branch", branches, true,
 			"other (type a branch name)", def, def)

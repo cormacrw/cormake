@@ -41,6 +41,15 @@ type Workspace struct {
 	// means no template.
 	TaskTemplate string
 
+	// DefaultTargetBranch is the branch a new task's work should merge
+	// into by default — named "target" to match how it's presented in the
+	// new-task wizard (a PR's target branch), even though it fills
+	// Task.SourceBranch, this codebase's name for that same concept (see
+	// Task.SourceBranch's doc comment). Hand-edited via workspaces.json,
+	// same as TaskTemplate/Prefix — empty means unset, see
+	// EffectiveDefaultTargetBranch.
+	DefaultTargetBranch string
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -58,4 +67,14 @@ func (w Workspace) EffectiveMaxConcurrentAgents() int {
 		return w.MaxConcurrentAgents
 	}
 	return DefaultMaxConcurrentAgents
+}
+
+// EffectiveDefaultTargetBranch returns the branch a new task's source
+// branch should default to in the new-task wizard: DefaultTargetBranch if
+// set, else DefaultSourceBranch.
+func (w Workspace) EffectiveDefaultTargetBranch() string {
+	if w.DefaultTargetBranch != "" {
+		return w.DefaultTargetBranch
+	}
+	return DefaultSourceBranch
 }

@@ -49,9 +49,8 @@ func findWorktreeForBranch(repoPath, branch string) (string, bool) {
 }
 
 // slugify lowercases s and collapses every run of non-alphanumeric
-// characters into a single "-", trimming any trailing one — the shared
-// branch-naming convention used both for a task's suggested target branch
-// and its eventual completed-feature branch (see suggestBranchName).
+// characters into a single "-", trimming any trailing one — used to name a
+// task's eventual completed-feature branch (see suggestBranchName).
 func slugify(s string) string {
 	var b strings.Builder
 	lastDash := false
@@ -75,15 +74,11 @@ func slugify(s string) string {
 }
 
 // suggestTargetBranchName derives a default new-branch name from a task's
-// title, shown as the default option in the new-task wizard's target-branch
-// step (and the standalone change-target-branch shortcut). Distinct from
-// suggestBranchName's "feature/" prefix (the completed-work branch chosen
-// at Complete time) since this names the in-progress working branch
-// instead.
-func suggestTargetBranchName(title string) string {
-	name := slugify(title)
-	if name == "" {
-		name = "untitled"
-	}
-	return "task/" + name
+// human-readable id, shown as the default option in the new-task wizard's
+// target-branch step (and the standalone change-target-branch shortcut).
+// Distinct from suggestBranchName's "feature/" prefix (the completed-work
+// branch chosen at Complete time) since this names the in-progress working
+// branch instead.
+func suggestTargetBranchName(displayID string) string {
+	return "feat/" + displayID
 }

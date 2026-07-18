@@ -51,3 +51,11 @@ func (w *Workspace) NextDisplayID() string {
 	w.NextTaskNumber++
 	return fmt.Sprintf("%s-%d", w.effectivePrefix(), w.NextTaskNumber)
 }
+
+// PeekNextDisplayID returns what NextDisplayID would return, without
+// advancing NextTaskNumber — used to preview a not-yet-created task's id
+// (e.g. suggesting its default branch name in the new-task wizard, before
+// the task itself, and its real id, exist).
+func (w Workspace) PeekNextDisplayID() string {
+	return fmt.Sprintf("%s-%d", w.effectivePrefix(), w.NextTaskNumber+1)
+}

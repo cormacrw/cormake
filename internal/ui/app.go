@@ -776,7 +776,7 @@ func (m *Model) handleCompleteFinished(msg completeFinishedMsg) {
 // suggestBranchName derives a starting-point feature-branch name from a
 // task's title (see slugify). Just a default shown in the complete modal's
 // input; the user can freely edit it before confirming. Distinct from
-// suggestTargetBranchName's "task/" prefix (branches.go) — this names the
+// suggestTargetBranchName's "feat/" prefix (branches.go) — this names the
 // finished-work branch a task lands on at Complete time, not the in-progress
 // working branch it started from.
 func suggestBranchName(t domain.Task) string {

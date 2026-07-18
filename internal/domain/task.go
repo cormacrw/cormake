@@ -101,8 +101,8 @@ type Task struct {
 	// SourceBranch is the branch this task's work will eventually be merged
 	// into — independent of TargetBranch (the branch actually committed to)
 	// and of the repo's own git HEAD, since neither necessarily matches
-	// where the work should land once reviewed. Defaults to
-	// DefaultSourceBranch, overridable in the new-task wizard.
+	// where the work should land once reviewed. Defaults to the workspace's
+	// EffectiveDefaultTargetBranch, overridable in the new-task wizard.
 	SourceBranch string
 
 	// PlanFilePath points at the plan claude wrote during a plan-mode run.

@@ -81,7 +81,7 @@ func (m *Model) createTaskQuick(title string) {
 	if len(ws.Repos) > 0 {
 		repoID = ws.Repos[0].ID
 	}
-	m.createTask(title, repoID, suggestTargetBranchName(title), domain.DefaultSourceBranch)
+	m.createTask(title, repoID, suggestTargetBranchName(ws.PeekNextDisplayID()), ws.EffectiveDefaultTargetBranch())
 }
 
 // updateNewTaskWizard forwards a key to whichever step is currently active,
@@ -195,7 +195,8 @@ func (m Model) advanceWizardFromRepo() (tea.Model, tea.Cmd) {
 	w := m.wizard
 	w.repoPath, _ = m.repoPath(w.repoID)
 	branches := listLocalBranches(w.repoPath)
-	suggested := suggestTargetBranchName(w.title)
+	ws := m.workspaces[m.activeWS]
+	suggested := suggestTargetBranchName(ws.PeekNextDisplayID())
 
 	w.step = wizardStepTarget
 	w.targetPicker = newBranchPicker(
@@ -206,15 +207,17 @@ func (m Model) advanceWizardFromRepo() (tea.Model, tea.Cmd) {
 }
 
 // advanceWizardFromTarget moves from the target-branch step to the
-// source-branch step, defaulting to domain.DefaultSourceBranch.
+// source-branch step, defaulting to and preselecting the active workspace's
+// EffectiveDefaultTargetBranch.
 func (m Model) advanceWizardFromTarget() (tea.Model, tea.Cmd) {
 	w := m.wizard
 	branches := listLocalBranches(w.repoPath)
+	def := m.workspaces[m.activeWS].EffectiveDefaultTargetBranch()
 
 	w.step = wizardStepSource
 	w.sourcePicker = newBranchPicker(
 		"Source branch — where this work will eventually be merged",
-		branches, true, "other (type a branch name)", domain.DefaultSourceBranch, domain.DefaultSourceBranch,
+		branches, true, "other (type a branch name)", def, def,
 	)
 	return m, w.sourcePicker.Init()
 }

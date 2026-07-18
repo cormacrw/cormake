@@ -52,6 +52,7 @@ There's no settings UI yet — per-workspace options are hand-edited directly in
   "Prefix": "ACME",
   "NextTaskNumber": 8,
   "MaxConcurrentAgents": 3,
+  "DefaultTargetBranch": "main",
   "CreatedAt": "2026-01-05T10:00:00Z",
   "UpdatedAt": "2026-01-05T10:00:00Z"
 }
@@ -61,6 +62,7 @@ There's no settings UI yet — per-workspace options are hand-edited directly in
 - `Prefix` — readable-id prefix for its tasks, e.g. `ACME` -> `ACME-7`. Auto-derived from `Name` if unset.
 - `NextTaskNumber` — next sequence number `Prefix` will hand out; doesn't reset when `Prefix` is edited by hand.
 - `MaxConcurrentAgents` — caps how many Plan/Execute agents can run at once across this workspace's tasks. `0` (or omitted) means "unset" and falls back to a default of `1`, not "unlimited" — raise it deliberately if you want more agents running in parallel.
+- `DefaultTargetBranch` — the branch a new task's work should merge into by default; preselected (and listed first) in the new-task wizard's source-branch step. Omitted means "unset" and falls back to `"develop"`.
 
 ## Keybindings
 
