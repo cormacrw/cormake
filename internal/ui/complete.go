@@ -67,17 +67,32 @@ func commitWorktreeChanges(worktreePath, message string) error {
 }
 
 // createWorktree creates a new git worktree at
-// <repoPath>/.claude/worktrees/<name>, forking from repoPath's actual local
-// HEAD. This is deliberately cormake's own job rather than handed to
-// claude's own -w/--worktree flag: confirmed directly that -w instead forks
-// from the repo's remote-tracking default branch whenever one is
-// configured — regardless of which local branch is checked out or how far
-// local HEAD has diverged from it — silently dropping any local-only
-// commits. Doing it ourselves guarantees the worktree actually reflects
-// what's on disk.
-func createWorktree(repoPath, name string) (string, error) {
-	path := filepath.Join(repoPath, ".claude", "worktrees", name)
-	if out, err := runGit(repoPath, "worktree", "add", "-b", name, path, "HEAD"); err != nil {
+// <repoPath>/.claude/worktrees/<dir-safe branch name> for branch. If branch
+// already exists in repoPath, the worktree checks it out as-is (this is how
+// "allow task on existing branch" is honored — see findWorktreeForBranch
+// for the case where that branch already has a worktree open elsewhere,
+// which this function is never called for). Otherwise branch is created
+// fresh, forking from repoPath's actual local HEAD.
+//
+// Forking new branches from local HEAD (rather than handing worktree
+// creation to claude's own -w/--worktree flag) is deliberate: confirmed
+// directly that -w instead forks from the repo's remote-tracking default
+// branch whenever one is configured — regardless of which local branch is
+// checked out or how far local HEAD has diverged from it — silently
+// dropping any local-only commits. Doing it ourselves guarantees the
+// worktree actually reflects what's on disk.
+func createWorktree(repoPath, branch string) (string, error) {
+	dirName := strings.ReplaceAll(branch, "/", "-")
+	path := filepath.Join(repoPath, ".claude", "worktrees", dirName)
+
+	var out string
+	var err error
+	if branchExists(repoPath, branch) {
+		out, err = runGit(repoPath, "worktree", "add", path, branch)
+	} else {
+		out, err = runGit(repoPath, "worktree", "add", "-b", branch, path, "HEAD")
+	}
+	if err != nil {
 		return "", fmt.Errorf("%w: %s", err, out)
 	}
 	return path, nil

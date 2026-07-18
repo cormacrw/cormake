@@ -37,6 +37,15 @@ type KeyMap struct {
 	Open       key.Binding // enters edit mode for the selected task's title/body
 	Workspaces key.Binding // opens the workspace-picker modal
 
+	// ChangeTargetBranch/ChangeSourceBranch open a standalone branch-picker
+	// modal (see branchmodal.go) to change the selected task's target or
+	// source branch after it was already set in the new-task wizard.
+	// ChangeTargetBranch only takes effect before a worktree exists yet
+	// (see openBranchPickerModal); ChangeSourceBranch is unrestricted,
+	// since it's just bookkeeping about the eventual merge destination.
+	ChangeTargetBranch key.Binding
+	ChangeSourceBranch key.Binding
+
 	// Plan spawns a read-only claude run (TODO -> PLANNING -> PLANNED).
 	// Execute spawns a real claude run with edits enabled, inside a fresh
 	// git worktree (TODO/PLANNED -> IN_PROGRESS -> READY_FOR_REVIEW). Both
@@ -93,6 +102,9 @@ var keys = KeyMap{
 	Open:       key.NewBinding(key.WithKeys("enter")),
 	Workspaces: key.NewBinding(key.WithKeys("w")),
 
+	ChangeTargetBranch: key.NewBinding(key.WithKeys("t")),
+	ChangeSourceBranch: key.NewBinding(key.WithKeys("s")),
+
 	Plan:    key.NewBinding(key.WithKeys("p")),
 	Execute: key.NewBinding(key.WithKeys("e")),
 	Review:  key.NewBinding(key.WithKeys("r")),
@@ -110,4 +122,4 @@ var keys = KeyMap{
 	Help:    key.NewBinding(key.WithKeys("?")),
 }
 
-const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [r]eview [i]nput [m]ark complete [a]rchive [d]elete [w]orkspaces tabs:1-4/[/] arrows:scroll [?]help [q]uit"
+const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [r]eview [i]nput [m]ark complete [t]arget-branch [s]ource-branch [a]rchive [d]elete [w]orkspaces tabs:1-4/[/] arrows:scroll [?]help [q]uit"

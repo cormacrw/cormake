@@ -228,6 +228,16 @@ func (m Model) renderHeader() string {
 	// Workspace isn't shown here — the app's top bar already names the
 	// active workspace, so repeating it in every task's header is redundant.
 	metaText := fmt.Sprintf("repo: %s   %s %s   created %s", m.repoName, glyph, stage, relativeTime(m.task.CreatedAt))
+	// Older tasks predate the target/source-branch wizard and simply have
+	// neither set — skip the segment entirely rather than showing a
+	// misleading blank "→".
+	if m.task.TargetBranch != "" {
+		source := m.task.SourceBranch
+		if source == "" {
+			source = domain.DefaultSourceBranch
+		}
+		metaText += fmt.Sprintf("   %s → %s", m.task.TargetBranch, source)
+	}
 	meta := metaStyle.Render(truncate(metaText, m.width))
 	tabBar := m.renderTabBar()
 	divider := dividerStyle.Render(strings.Repeat("─", max0(m.width)))

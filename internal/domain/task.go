@@ -2,6 +2,11 @@ package domain
 
 import "time"
 
+// DefaultSourceBranch is the branch a new task's SourceBranch defaults to
+// before the user picks a different one in the new-task wizard — the
+// branch this task's work will eventually be merged into.
+const DefaultSourceBranch = "develop"
+
 // Status is a task's position in its lifecycle pipeline:
 //
 //	TODO -> (optionally) PLANNING -> PLANNED -> IN_PROGRESS -> AWAITING_APPROVAL* -> READY_FOR_REVIEW -> COMPLETE
@@ -83,6 +88,22 @@ type Task struct {
 	// renamed to whatever name was given in the complete modal, then left
 	// behind in the repo after the worktree itself is removed.
 	Branch string
+
+	// TargetBranch is the branch this task's work is committed to — chosen
+	// in the new-task wizard (see ui.newTaskWizard), defaulting to a fresh
+	// branch auto-named from the task's title unless the user picks an
+	// existing one instead. If that branch already has a worktree open
+	// elsewhere, Execute reuses it rather than creating a second one (see
+	// ui.findWorktreeForBranch) — git itself would refuse a second worktree
+	// on the same branch anyway.
+	TargetBranch string
+
+	// SourceBranch is the branch this task's work will eventually be merged
+	// into — independent of TargetBranch (the branch actually committed to)
+	// and of the repo's own git HEAD, since neither necessarily matches
+	// where the work should land once reviewed. Defaults to
+	// DefaultSourceBranch, overridable in the new-task wizard.
+	SourceBranch string
 
 	// PlanFilePath points at the plan claude wrote during a plan-mode run.
 	// claude's plan-mode has a built-in, hardcoded allowance to write to
