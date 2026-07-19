@@ -61,9 +61,12 @@ func (m *Model) openBranchPickerModal(kind branchPickerKind) tea.Cmd {
 // updateBranchPickerModal handles input while a standalone branch picker is
 // open: esc cancels without changing anything (see updateNewTaskWizard for
 // why esc, not huh's own ctrl+c, is what cancels here), everything else is
-// forwarded to the picker itself.
+// forwarded to the picker itself. While the picker's own "/" search box is
+// engaged, esc is forwarded instead of canceling outright — see
+// branchPicker.Searching — so backing out of a search doesn't also close
+// the whole modal.
 func (m Model) updateBranchPickerModal(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if km, ok := msg.(tea.KeyMsg); ok && km.String() == "esc" {
+	if km, ok := msg.(tea.KeyMsg); ok && km.String() == "esc" && !m.branchPicker.Searching() {
 		m.branchPickerOpen = false
 		m.branchPicker = nil
 		return m, nil

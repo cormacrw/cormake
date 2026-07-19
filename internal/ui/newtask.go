@@ -49,6 +49,20 @@ type newTaskWizard struct {
 	confirmed   bool
 }
 
+// activePickerSearching reports whether the wizard's current step is one of
+// the two branch-picker steps and that picker's "/" search box is currently
+// engaged — see updateNewTaskWizard's esc handling.
+func (w *newTaskWizard) activePickerSearching() bool {
+	switch w.step {
+	case wizardStepTarget:
+		return w.targetPicker.Searching()
+	case wizardStepSource:
+		return w.sourcePicker.Searching()
+	default:
+		return false
+	}
+}
+
 func requireTaskTitle(s string) error {
 	if strings.TrimSpace(s) == "" {
 		return errors.New("a task name is required")
@@ -90,11 +104,15 @@ func (m *Model) createTaskQuick(title string) {
 // esc cancels the whole wizard outright rather than being forwarded into
 // huh: huh's own abort binding is ctrl+c (see its KeyMap), which this app
 // intercepts globally for tea.Quit before any modal ever sees it (see
-// Update), so relying on huh's own StateAborted would never fire.
+// Update), so relying on huh's own StateAborted would never fire. The one
+// exception is while the active step's branch picker has its "/" search box
+// engaged (see branchPicker.Searching) — there esc is forwarded into the
+// picker instead, so it backs out of the search rather than closing the
+// whole wizard.
 func (m Model) updateNewTaskWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	w := m.wizard
 	if km, ok := msg.(tea.KeyMsg); ok {
-		if km.String() == "esc" {
+		if km.String() == "esc" && !w.activePickerSearching() {
 			m.wizard = nil
 			return m, nil
 		}

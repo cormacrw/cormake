@@ -29,6 +29,14 @@ type branchPicker struct {
 	value string // bound to the input field once shown, pre-filled with suggested
 
 	done bool
+
+	// searching tracks whether the select step's built-in "/" filter (huh's
+	// Select supports typing to search its options out of the box) is
+	// currently engaged, so callers embedding this picker in a larger esc-
+	// cancels-everything flow (see Update, and updateBranchPickerModal /
+	// updateNewTaskWizard) can let a lone esc back out of the search box
+	// first instead of immediately closing the whole picker.
+	searching bool
 }
 
 // newBranchPicker builds a picker offering branches plus, if allowNew, a
@@ -111,6 +119,24 @@ func (p *branchPicker) Update(msg tea.Msg) tea.Cmd {
 		return cmd
 	}
 
+	// Mirror huh's own filtering state machine (see its Select.setFiltering)
+	// just enough to know whether esc should be treated as "back out of the
+	// search box" rather than "cancel the picker": "/" opens the filter,
+	// and huh unconditionally closes it again on enter/tab (it submits the
+	// highlighted, possibly-filtered option) or esc (huh's own filter-step
+	// esc binding, forwarded through once the caller sees searching go
+	// false here) — so a single esc always resolves back to "not
+	// searching," even though huh itself needs a second esc to fully clear
+	// the typed filter text.
+	if km, ok := msg.(tea.KeyMsg); ok {
+		switch km.String() {
+		case "/":
+			p.searching = true
+		case "enter", "tab", "esc":
+			p.searching = false
+		}
+	}
+
 	f, cmd := p.selectForm.Update(msg)
 	p.selectForm = f.(*huh.Form)
 	if p.selectForm.State == huh.StateCompleted {
@@ -135,6 +161,11 @@ func (p *branchPicker) View() string {
 
 // Done reports whether the picker has a final value ready (see Result).
 func (p *branchPicker) Done() bool { return p.done }
+
+// Searching reports whether the select step's "/" filter is currently
+// engaged (see the searching field), so an enclosing esc-cancels-everything
+// flow can let esc dismiss the search first instead of closing the picker.
+func (p *branchPicker) Searching() bool { return p.searching }
 
 // Result returns the picker's resolved branch name, valid once Done.
 func (p *branchPicker) Result() string { return strings.TrimSpace(p.value) }
