@@ -10,29 +10,30 @@ import (
 )
 
 // completeFinishedMsg reports the outcome of finalizing a task: committing
-// its worktree's outstanding changes onto a named feature branch and
-// removing the worktree.
+// its worktree's outstanding changes onto its target branch and removing
+// the worktree.
 type completeFinishedMsg struct {
 	taskID string
 	branch string
 	err    error
 }
 
-// completeTaskCmd commits any outstanding changes in the task's worktree,
-// renames its branch to branch, and removes the worktree — the standard
-// "done with this worktree" sequence. The unlock call is best-effort: a
-// worktree cormake created itself (see createWorktree) is never locked, but
-// this also has to handle worktrees created by older cormake builds via
-// claude's own -w, which does lock them while its session is active —
-// `git worktree remove` refuses those outright otherwise (confirmed
-// directly: "cannot remove a locked working tree").
+// completeTaskCmd commits any outstanding changes in the task's worktree —
+// already checked out onto branch (its TargetBranch, see
+// resolveTaskWorktree) — and removes the worktree, the standard "done with
+// this worktree" sequence. There's no rename here: every execution attempt
+// already committed straight onto branch (see handleTaskFinished), so this
+// is just a catch-all for anything left uncommitted plus cleanup. The
+// unlock call is best-effort: a worktree cormake created itself (see
+// createWorktree) is never locked, but this also has to handle worktrees
+// created by older cormake builds via claude's own -w, which does lock them
+// while its session is active — `git worktree remove` refuses those
+// outright otherwise (confirmed directly: "cannot remove a locked working
+// tree").
 func completeTaskCmd(taskID, repoPath, worktreePath, branch, commitMessage string) tea.Cmd {
 	return func() tea.Msg {
 		if err := commitWorktreeChanges(worktreePath, commitMessage); err != nil {
 			return completeFinishedMsg{taskID: taskID, err: fmt.Errorf("commit: %w", err)}
-		}
-		if out, err := runGit(worktreePath, "branch", "-m", branch); err != nil {
-			return completeFinishedMsg{taskID: taskID, err: fmt.Errorf("rename branch: %w: %s", err, out)}
 		}
 		// Best-effort: a worktree that was never locked (or got unlocked
 		// some other way) errors here too, and remove below still works —

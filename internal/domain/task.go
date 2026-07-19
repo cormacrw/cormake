@@ -83,10 +83,10 @@ type Task struct {
 	// independent of each other.
 	WorktreeBaseRef string
 
-	// Branch is the feature branch the task's work landed on once marked
-	// complete (see the Complete-task flow) — the worktree's own branch,
-	// renamed to whatever name was given in the complete modal, then left
-	// behind in the repo after the worktree itself is removed.
+	// Branch is the branch the task's work landed on once marked complete
+	// (see the Complete-task flow) — the same branch as TargetBranch, the
+	// worktree's own branch throughout execution, left behind in the repo
+	// after the worktree itself is removed.
 	Branch string
 
 	// ExecutionAttempts counts how many Complete-mode runs (the initial

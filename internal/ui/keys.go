@@ -30,9 +30,9 @@ type KeyMap struct {
 	// eligibility check — delete works no matter what stage the task is in).
 	Delete key.Binding
 
-	// Complete finalizes a READY_FOR_REVIEW task that's been executed:
-	// prompts for a feature branch name, commits the worktree's outstanding
-	// changes onto it, removes the worktree, and moves the task to COMPLETE.
+	// Complete finalizes a READY_FOR_REVIEW task that's been executed: behind
+	// a confirmation, commits the worktree's outstanding changes onto its
+	// target branch, removes the worktree, and moves the task to COMPLETE.
 	Complete key.Binding
 
 	Open       key.Binding // enters edit mode for the selected task's title/body

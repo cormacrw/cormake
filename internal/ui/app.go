@@ -16,7 +16,6 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/google/uuid"
@@ -68,10 +67,6 @@ type Model struct {
 	branchPicker       *branchPicker
 	branchPickerKind   branchPickerKind
 	branchPickerTaskID string
-
-	completeModalOpen bool
-	completeInput     textinput.Model
-	completeTaskID    string
 
 	// inputModalOpen stages a free-form message to send to a PLANNED or
 	// READY_FOR_REVIEW task's claude session (see keys.Input) — a lighter
@@ -201,11 +196,6 @@ func New(st *store.Store) (Model, error) {
 		}
 	}
 
-	ci := textinput.New()
-	ci.Placeholder = "feature branch name"
-	ci.CharLimit = 200
-	ci.Width = 40
-
 	ta := textarea.New()
 	ta.Placeholder = "Type a message to send to claude..."
 	ta.CharLimit = 4000
@@ -220,7 +210,6 @@ func New(st *store.Store) (Model, error) {
 		repoNames:     repoNames,
 		tasklist:      tasklist.New(nil),
 		detail:        detail.New(logs),
-		completeInput: ci,
 		inputTextarea: ta,
 		runner:        claude.Client{},
 		eventsCh:      make(chan tea.Msg, 64),
@@ -347,10 +336,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateWorkspaceModal(msg)
 		}
 
-		if m.completeModalOpen {
-			return m.updateCompleteModal(msg)
-		}
-
 		if m.inputModalOpen {
 			return m.updateInputModal(msg)
 		}
@@ -405,9 +390,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keys.Complete):
 			m.openCompleteModal()
-			if m.completeModalOpen {
-				return m, m.completeInput.Focus()
-			}
 			return m, nil
 
 		case key.Matches(msg, keys.Open):
@@ -570,15 +552,17 @@ func (m *Model) reloadWorkspaces() {
 }
 
 // confirmKind distinguishes what a pending confirmation modal will do once
-// confirmed — a Status transition (Plan/Execute) or an unconditional delete.
-// Kept as plain data on Model rather than a stored closure: Update has a
-// value receiver, so a new Model copy exists by the time "y" is handled, and
-// a closure captured over the old *Model would be acting on a stale snapshot.
+// confirmed — a Status transition (Plan/Execute), an unconditional delete,
+// or finalizing a task's worktree (Complete). Kept as plain data on Model
+// rather than a stored closure: Update has a value receiver, so a new Model
+// copy exists by the time "y" is handled, and a closure captured over the
+// old *Model would be acting on a stale snapshot.
 type confirmKind int
 
 const (
 	confirmKindTransition confirmKind = iota
 	confirmKindDelete
+	confirmKindComplete
 )
 
 // openConfirm stages a Plan/Execute status change behind a confirmation
@@ -631,42 +615,20 @@ func (m *Model) openDeleteConfirm() {
 	m.confirmTaskID = t.ID
 }
 
-// openCompleteModal stages finalizing the selected task — only eligible once
-// it's actually been executed (has a worktree) and is ready for review — and
-// prompts for the feature branch name the committed work should land on.
+// openCompleteModal stages finalizing the selected task behind a
+// confirmation modal — only eligible once it's actually been executed (has
+// a worktree) and is ready for review. Its work is already committed onto
+// TargetBranch throughout execution (see handleTaskFinished), so there's no
+// branch name left to ask for — just a confirmation that it's really done.
 func (m *Model) openCompleteModal() {
 	t, ok := m.tasklist.Selected()
 	if !ok || t.Status != domain.StatusReadyForReview || t.WorktreePath == "" {
 		return
 	}
-	m.completeTaskID = t.ID
-	m.completeInput.SetValue(suggestBranchName(t))
-	m.completeInput.CursorEnd()
-	m.completeModalOpen = true
-}
-
-// updateCompleteModal handles input while the branch-name prompt is open:
-// enter commits the worktree's changes onto the given branch and removes
-// the worktree (see complete.go), esc cancels without touching anything.
-func (m Model) updateCompleteModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.completeModalOpen = false
-		m.completeInput.Blur()
-		return m, nil
-	case "enter":
-		branch := strings.TrimSpace(m.completeInput.Value())
-		m.completeModalOpen = false
-		m.completeInput.Blur()
-		if branch == "" {
-			return m, nil
-		}
-		cmd := m.startCompleteTask(branch)
-		return m, cmd
-	}
-	var cmd tea.Cmd
-	m.completeInput, cmd = m.completeInput.Update(msg)
-	return m, cmd
+	m.confirmModalOpen = true
+	m.confirmMessage = fmt.Sprintf("Mark %q complete? This commits any outstanding changes and removes the worktree.", t.Title)
+	m.confirmKind = confirmKindComplete
+	m.confirmTaskID = t.ID
 }
 
 // openInputModal stages a free-form message to send to the selected task's
@@ -731,12 +693,15 @@ func (m *Model) sendInputPrompt(message string) tea.Cmd {
 // startCompleteTask kicks off finalizing the task openCompleteModal staged
 // (by ID, not the current selection — the modal blocks all other input so
 // it can't have changed, but this matches openDeleteConfirm's pattern of
-// resolving the target once, up front).
-func (m *Model) startCompleteTask(branch string) tea.Cmd {
+// resolving the target once, up front). The branch it lands on is always
+// the worktree's own branch — target.TargetBranch, already committed to
+// throughout execution (see handleTaskFinished) — never a separately typed
+// name, so there's nothing left to prompt for here.
+func (m *Model) startCompleteTask() tea.Cmd {
 	var target domain.Task
 	found := false
 	for _, t := range m.tasks {
-		if t.ID == m.completeTaskID {
+		if t.ID == m.confirmTaskID {
 			target = t
 			found = true
 			break
@@ -749,6 +714,10 @@ func (m *Model) startCompleteTask(branch string) tea.Cmd {
 	if !ok || repoPath == "" {
 		m.appendLogLine(target.ID, logCormakeLine("cannot complete — task has no repo assigned"))
 		return nil
+	}
+	branch := target.TargetBranch
+	if branch == "" {
+		branch = target.WorktreeName
 	}
 	m.appendLogLine(target.ID, logCormakeLine("finalizing onto branch "+branch))
 	return completeTaskCmd(target.ID, repoPath, target.WorktreePath, branch, "cormake: "+target.Title)
@@ -779,23 +748,9 @@ func (m *Model) handleCompleteFinished(msg completeFinishedMsg) {
 	m.syncDetail()
 }
 
-// suggestBranchName derives a starting-point feature-branch name from a
-// task's title (see slugify). Just a default shown in the complete modal's
-// input; the user can freely edit it before confirming. Distinct from
-// suggestTargetBranchName's "feat/" prefix (branches.go) — this names the
-// finished-work branch a task lands on at Complete time, not the in-progress
-// working branch it started from.
-func suggestBranchName(t domain.Task) string {
-	name := slugify(t.Title)
-	if name == "" {
-		name = shortTaskID(t.ID)
-	}
-	return "feature/" + name
-}
-
 // updateConfirmModal handles input while the confirmation prompt is open:
-// y/enter carries out whatever's staged (a status change or a delete),
-// anything else (n/esc/q) cancels without changing anything.
+// y/enter carries out whatever's staged (a status change, a delete, or a
+// complete), anything else (n/esc/q) cancels without changing anything.
 func (m Model) updateConfirmModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "enter":
@@ -803,6 +758,10 @@ func (m Model) updateConfirmModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.confirmKind == confirmKindDelete {
 			m.deleteTask(m.confirmTaskID)
 			return m, nil
+		}
+		if m.confirmKind == confirmKindComplete {
+			cmd := m.startCompleteTask()
+			return m, cmd
 		}
 		if m.confirmTo == domain.StatusPlanning {
 			cmd := m.startPlanRun()
@@ -1867,10 +1826,6 @@ func (m Model) View() string {
 		return m.renderBranchPickerModal()
 	}
 
-	if m.completeModalOpen {
-		return m.renderCompleteModal()
-	}
-
 	if m.inputModalOpen {
 		return m.renderInputModal()
 	}
@@ -1953,19 +1908,6 @@ func swatchColor(c string) string {
 		return theme.DefaultAccent
 	}
 	return c
-}
-
-// renderCompleteModal draws the mark-complete branch-name prompt, centered
-// over the full screen.
-func (m Model) renderCompleteModal() string {
-	lines := []string{
-		"Mark task complete", "",
-		"Commit changes and finalize onto branch:", "",
-		m.completeInput.View(), "",
-		tabInfoStyle.Render("[enter] complete   [esc] cancel"),
-	}
-	box := focusedPaneBorderStyle().Padding(1, 3).Render(strings.Join(lines, "\n"))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 // renderInputModal draws the free-form message textarea, centered over the
