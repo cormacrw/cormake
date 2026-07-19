@@ -74,36 +74,55 @@ func (m *Model) UpdateSpinner(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
-// toItems splits tasks into two sections — planned/ready-for-review at the
-// top (in whatever order they were given, i.e. creation order), everything
-// else below ordered by most-recently-updated first — separated by a
-// header row when both sections are non-empty. Headers are inert dividers
-// (see skipHeader) rather than selectable rows.
+// toItems splits tasks into three sections — planned/ready-for-review at
+// the top (in whatever order they were given, i.e. creation order),
+// planning/in-progress next, then everything else — the latter two ordered
+// by most-recently-updated first — separated by header rows wherever two
+// non-empty sections meet. Headers are inert dividers (see skipHeader)
+// rather than selectable rows.
 func toItems(tasks []domain.Task) []list.Item {
-	var top, bottom []domain.Task
+	var top, active, bottom []domain.Task
 	for _, t := range tasks {
-		if t.Status == domain.StatusPlanned || t.Status == domain.StatusReadyForReview {
+		switch t.Status {
+		case domain.StatusPlanned, domain.StatusReadyForReview:
 			top = append(top, t)
-		} else {
+		case domain.StatusPlanning, domain.StatusInProgress:
+			active = append(active, t)
+		default:
 			bottom = append(bottom, t)
 		}
 	}
+	sort.SliceStable(active, func(i, j int) bool {
+		return active[i].UpdatedAt.After(active[j].UpdatedAt)
+	})
 	sort.SliceStable(bottom, func(i, j int) bool {
 		return bottom[i].UpdatedAt.After(bottom[j].UpdatedAt)
 	})
 
-	// Only label the split when there's actually something on both sides of
-	// it — a single-section list shouldn't grow a redundant header.
-	showHeaders := len(top) > 0 && len(bottom) > 0
+	// Only label a section when there's more than one populated section
+	// overall — a single-section list shouldn't grow a redundant header.
+	populated := 0
+	for _, s := range [][]domain.Task{top, active, bottom} {
+		if len(s) > 0 {
+			populated++
+		}
+	}
+	showHeaders := populated > 1
 
-	items := make([]list.Item, 0, len(tasks)+2)
-	if showHeaders {
+	items := make([]list.Item, 0, len(tasks)+3)
+	if showHeaders && len(top) > 0 {
 		items = append(items, Item{Header: true, HeaderText: "PLANNED / READY FOR REVIEW"})
 	}
 	for _, t := range top {
 		items = append(items, Item{Task: t})
 	}
-	if showHeaders {
+	if showHeaders && len(active) > 0 {
+		items = append(items, Item{Header: true, HeaderText: "IN PROGRESS"})
+	}
+	for _, t := range active {
+		items = append(items, Item{Task: t})
+	}
+	if showHeaders && len(bottom) > 0 {
 		items = append(items, Item{Header: true, HeaderText: "OTHER"})
 	}
 	for _, t := range bottom {

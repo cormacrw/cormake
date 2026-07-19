@@ -12,11 +12,12 @@ import (
 func TestToItemsSplitsAndOrdersSections(t *testing.T) {
 	now := time.Now()
 	todoOld := domain.Task{ID: "todo-old", Status: domain.StatusTodo, UpdatedAt: now.Add(-2 * time.Hour)}
-	todoNew := domain.Task{ID: "todo-new", Status: domain.StatusInProgress, UpdatedAt: now}
+	inProgressOld := domain.Task{ID: "in-progress-old", Status: domain.StatusInProgress, UpdatedAt: now.Add(-1 * time.Hour)}
+	inProgressNew := domain.Task{ID: "in-progress-new", Status: domain.StatusPlanning, UpdatedAt: now}
 	planned := domain.Task{ID: "planned", Status: domain.StatusPlanned}
 	review := domain.Task{ID: "review", Status: domain.StatusReadyForReview}
 
-	items := toItems([]domain.Task{todoOld, planned, todoNew, review})
+	items := toItems([]domain.Task{todoOld, planned, inProgressOld, inProgressNew, review})
 
 	var gotIDs []string
 	var headers []string
@@ -29,19 +30,50 @@ func TestToItemsSplitsAndOrdersSections(t *testing.T) {
 		gotIDs = append(gotIDs, i.Task.ID)
 	}
 
-	wantHeaders := []string{"PLANNED / READY FOR REVIEW", "OTHER"}
-	if len(headers) != len(wantHeaders) || headers[0] != wantHeaders[0] || headers[1] != wantHeaders[1] {
+	wantHeaders := []string{"PLANNED / READY FOR REVIEW", "IN PROGRESS", "OTHER"}
+	if len(headers) != len(wantHeaders) {
 		t.Fatalf("headers = %v, want %v", headers, wantHeaders)
 	}
+	for i, h := range wantHeaders {
+		if headers[i] != h {
+			t.Errorf("headers[%d] = %q, want %q", i, headers[i], h)
+		}
+	}
 
-	// Top section keeps input order; bottom section is most-recently-updated first.
-	wantIDs := []string{"planned", "review", "todo-new", "todo-old"}
+	// Top section keeps input order; the other two sections are
+	// most-recently-updated first.
+	wantIDs := []string{"planned", "review", "in-progress-new", "in-progress-old", "todo-old"}
 	if len(gotIDs) != len(wantIDs) {
 		t.Fatalf("gotIDs = %v, want %v", gotIDs, wantIDs)
 	}
 	for i, id := range wantIDs {
 		if gotIDs[i] != id {
 			t.Errorf("gotIDs[%d] = %q, want %q", i, gotIDs[i], id)
+		}
+	}
+}
+
+func TestToItemsOmitsEmptySectionHeaderWhenOnlyTwoPopulated(t *testing.T) {
+	now := time.Now()
+	planned := domain.Task{ID: "planned", Status: domain.StatusPlanned}
+	inProgress := domain.Task{ID: "in-progress", Status: domain.StatusInProgress, UpdatedAt: now}
+
+	items := toItems([]domain.Task{planned, inProgress})
+
+	var headers []string
+	for _, it := range items {
+		if i := it.(Item); i.Header {
+			headers = append(headers, i.HeaderText)
+		}
+	}
+
+	wantHeaders := []string{"PLANNED / READY FOR REVIEW", "IN PROGRESS"}
+	if len(headers) != len(wantHeaders) {
+		t.Fatalf("headers = %v, want %v", headers, wantHeaders)
+	}
+	for i, h := range wantHeaders {
+		if headers[i] != h {
+			t.Errorf("headers[%d] = %q, want %q", i, headers[i], h)
 		}
 	}
 }
