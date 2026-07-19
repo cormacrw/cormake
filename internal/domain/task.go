@@ -89,6 +89,14 @@ type Task struct {
 	// behind in the repo after the worktree itself is removed.
 	Branch string
 
+	// ExecutionAttempts counts how many Complete-mode runs (the initial
+	// execute plus every review-feedback revise) have finished in this
+	// task's worktree — each one gets its own commit (see
+	// ui.handleTaskFinished) rather than squashing everything together at
+	// Complete time, so the worktree's history stays one commit per attempt
+	// and is easier to step through in review.
+	ExecutionAttempts int
+
 	// TargetBranch is the branch this task's work is committed to — chosen
 	// in the new-task wizard (see ui.newTaskWizard), defaulting to a fresh
 	// branch auto-named from the task's title unless the user picks an

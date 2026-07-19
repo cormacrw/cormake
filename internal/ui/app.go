@@ -1492,6 +1492,17 @@ func (m *Model) setPlanFilePath(taskID, path string) {
 // This doesn't yet distinguish "genuinely failed" from "user cancelled"
 // (both look the same here) since there's no way to trigger Cancel from
 // the UI yet — that's still a future piece.
+//
+// Every Complete-mode run (WorktreePath set, whether it's the initial
+// execute or a later review-feedback revise) also gets committed here,
+// success or not — one commit per attempt rather than everything staying
+// squashed until the eventual completeTaskCmd commit, so a task's worktree
+// history is easy to step through attempt by attempt during review. The
+// commit body is ResultSummary, the claude-authored description of what
+// that particular attempt actually changed (see executeSummaryInstruction
+// and handleAgentEvent's EventResult case) — freshly overwritten by this
+// run's own EventResult before taskFinishedMsg ever arrives here, so it
+// describes this attempt specifically rather than some earlier one.
 func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 	delete(m.active, msg.TaskID)
 	sawResult := m.resultSeen[msg.TaskID]
@@ -1513,6 +1524,16 @@ func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 			m.tasks[i].Status = domain.StatusPlanned
 		case m.tasks[i].Status == domain.StatusInProgress:
 			m.tasks[i].Status = domain.StatusReadyForReview
+		}
+		if m.tasks[i].WorktreePath != "" {
+			m.tasks[i].ExecutionAttempts++
+			commitMsg := fmt.Sprintf("cormake: %s (attempt %d)", m.tasks[i].Title, m.tasks[i].ExecutionAttempts)
+			if summary := strings.TrimSpace(m.tasks[i].ResultSummary); summary != "" {
+				commitMsg += "\n\n" + summary
+			}
+			if err := commitWorktreeChanges(m.tasks[i].WorktreePath, commitMsg); err != nil {
+				m.appendLogLine(m.tasks[i].ID, logCormakeLine("failed to commit execution attempt: "+err.Error()))
+			}
 		}
 		m.persistTask(m.tasks[i])
 		break
