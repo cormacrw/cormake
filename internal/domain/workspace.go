@@ -56,7 +56,7 @@ type Workspace struct {
 
 // DefaultMaxConcurrentAgents is the cap applied when MaxConcurrentAgents is
 // unset. Kept low by default since each running agent is a full claude
-// subprocess plus, for Execute runs, its own git worktree.
+// subprocess plus its own git worktree.
 const DefaultMaxConcurrentAgents = 1
 
 // EffectiveMaxConcurrentAgents returns the cap on simultaneously running

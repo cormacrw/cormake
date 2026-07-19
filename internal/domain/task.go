@@ -70,10 +70,10 @@ type Task struct {
 	// the run has finished (see ui.handleTaskFinished).
 	PID int
 
-	// WorktreePath is the worktree's actual absolute path on disk, reported
-	// back by claude itself (its system/init "cwd") rather than assumed from
-	// WorktreeName — claude owns creating the worktree (see -w/--worktree),
-	// cormake just observes where it landed.
+	// WorktreePath is the worktree's actual absolute path on disk — set by
+	// cormake itself when it creates (or reuses) the worktree for a task's
+	// first Plan or Execute run (see ui.resolveTaskWorktree), not reported
+	// back by claude.
 	WorktreePath string
 
 	// WorktreeBaseRef is the repo's HEAD commit at the moment the worktree
@@ -94,16 +94,18 @@ type Task struct {
 	// task's worktree — each one gets its own commit (see
 	// ui.handleTaskFinished) rather than squashing everything together at
 	// Complete time, so the worktree's history stays one commit per attempt
-	// and is easier to step through in review.
+	// and is easier to step through in review. Plan-mode runs don't count,
+	// even though they share the same worktree (see ui.resolveTaskWorktree)
+	// — plan-mode never writes into it, so there'd be nothing to commit.
 	ExecutionAttempts int
 
 	// TargetBranch is the branch this task's work is committed to — chosen
 	// in the new-task wizard (see ui.newTaskWizard), defaulting to a fresh
 	// branch auto-named from the task's title unless the user picks an
 	// existing one instead. If that branch already has a worktree open
-	// elsewhere, Execute reuses it rather than creating a second one (see
-	// ui.findWorktreeForBranch) — git itself would refuse a second worktree
-	// on the same branch anyway.
+	// elsewhere, Plan/Execute reuse it rather than creating a second one
+	// (see ui.resolveTaskWorktree/ui.findWorktreeForBranch) — git itself
+	// would refuse a second worktree on the same branch anyway.
 	TargetBranch string
 
 	// SourceBranch is the branch this task's work will eventually be merged

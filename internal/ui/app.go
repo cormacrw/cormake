@@ -444,8 +444,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if t, ok := m.tasklist.Selected(); ok {
 				// Once a task has been executed, review the actual code
 				// changes rather than the plan that preceded it — the diff
-				// is the more concrete, more current artifact.
-				if t.WorktreePath != "" {
+				// is the more concrete, more current artifact. Planning and
+				// Planned are excluded even though those tasks now have a
+				// worktree too (see resolveTaskWorktree): plan-mode runs
+				// read-only, writing no diff into it — claude's plan-mode
+				// only ever writes the plan doc itself, and always to
+				// ~/.claude/plans/ (see domain.Task.PlanFilePath) — so
+				// there's nothing there yet worth diffing.
+				if t.WorktreePath != "" && t.Status != domain.StatusPlanning && t.Status != domain.StatusPlanned {
 					return m, openRevdiffDiffCmd(t.ID, t.WorktreePath, t.WorktreeBaseRef, t.ResultSummary)
 				}
 				if plan := m.readPlanFile(t); plan != "" {
@@ -1053,11 +1059,73 @@ func (m *Model) activeAgentCount(workspaceID string) int {
 	return n
 }
 
+// resolveTaskWorktree determines the worktree a Plan or Execute run should
+// operate in, shared by runPlanAgent/runExecuteAgent since both now need
+// one: a task's work may target a specific branch, and both researching and
+// implementing it should happen against that branch rather than whatever's
+// currently checked out in the repo's actual working copy.
+//
+// When resumeSessionID is set, this just returns t's existing
+// worktree/name/baseRef unchanged — a resumed run continues wherever its
+// session already left off. Otherwise it resolves t.TargetBranch (falling
+// back to worktreeName(t) for tasks predating the target-branch wizard) and
+// either reuses a worktree already open on that branch (e.g. one a prior
+// Plan run opened, or one opened for another task on the same branch) or
+// creates a fresh one.
+//
+// The bool return is false when the run can't proceed (worktree creation
+// failed, or a resume has no worktree on record) — the caller's own
+// appendLogLine already explains why, so callers just bail on false rather
+// than logging again.
+func (m *Model) resolveTaskWorktree(t domain.Task, repoPath, resumeSessionID string) (worktreePath, wtName, baseRef string, ok bool) {
+	wtName = t.WorktreeName
+	baseRef = t.WorktreeBaseRef
+	worktreePath = t.WorktreePath
+
+	if resumeSessionID == "" {
+		targetBranch := t.TargetBranch
+		if targetBranch == "" {
+			// Back-compat: tasks created before the target-branch wizard
+			// existed have no TargetBranch on record, so fall back to the
+			// old scheme of naming the branch after the task itself.
+			targetBranch = worktreeName(t)
+		}
+		wtName = targetBranch
+		baseRef = gitHeadRef(repoPath)
+
+		if existing, found := findWorktreeForBranch(repoPath, targetBranch); found {
+			m.appendLogLine(t.ID, logCormakeLine("reusing existing worktree already open on branch "+targetBranch))
+			worktreePath = existing
+		} else {
+			path, err := createWorktree(repoPath, targetBranch)
+			if err != nil {
+				m.appendLogLine(t.ID, logCormakeLine("failed to create worktree: "+err.Error()))
+				return "", "", "", false
+			}
+			worktreePath = path
+		}
+	}
+	if worktreePath == "" {
+		m.appendLogLine(t.ID, logCormakeLine("cannot resume — task has no worktree"))
+		return "", "", "", false
+	}
+	return worktreePath, wtName, baseRef, true
+}
+
 // runPlanAgent spawns a plan-mode claude run for t with the given prompt,
 // shared by the initial Plan action and the revise-after-review-feedback
 // flow (see revdiff.go). resumeSessionID, when non-empty, continues t's
 // existing session instead of starting a fresh one — used so claude has
 // full context of the plan it already proposed when revising it.
+//
+// Plan runs open a worktree the same way Execute runs do (see
+// resolveTaskWorktree) rather than working directly in repoPath — a task's
+// work may target a specific branch, and planning should research and write
+// its plan against that branch too, not whatever happens to be checked out
+// in the repo's actual working copy. A fresh Plan run's worktree is keyed by
+// TargetBranch, so a later Execute run on the same task reuses it (see
+// resolveTaskWorktree/findWorktreeForBranch) rather than opening a second
+// one.
 func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.Cmd {
 	repoPath, ok := m.repoPath(t.RepoID)
 	if !ok || repoPath == "" {
@@ -1069,10 +1137,15 @@ func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.
 		return nil
 	}
 
+	worktreePath, wtName, baseRef, ok := m.resolveTaskWorktree(t, repoPath, resumeSessionID)
+	if !ok {
+		return nil
+	}
+
 	spec := agent.RunSpec{
 		TaskID:          t.ID,
 		Prompt:          prompt,
-		RepoPath:        repoPath,
+		RepoPath:        worktreePath,
 		Mode:            agent.RunModePlan,
 		ResumeSessionID: resumeSessionID,
 		RawStdoutPath:   m.store.RawStdoutPath(t.ID),
@@ -1102,6 +1175,9 @@ func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.
 		if m.tasks[i].ID == t.ID {
 			m.tasks[i].Status = domain.StatusPlanning
 			m.tasks[i].SessionID = sessionID
+			m.tasks[i].WorktreeName = wtName
+			m.tasks[i].WorktreeBaseRef = baseRef
+			m.tasks[i].WorktreePath = worktreePath
 			m.tasks[i].PID = handle.PID
 			m.persistTask(m.tasks[i])
 			break
@@ -1132,13 +1208,15 @@ func (m *Model) startExecuteRun() tea.Cmd {
 // non-empty, continues t's existing session in its existing worktree
 // instead of starting a fresh one.
 //
-// A fresh run creates the worktree itself (see createWorktree in
-// complete.go) rather than asking claude to via -w/--worktree: confirmed
-// directly that -w forks from the repo's remote-tracking default branch
-// when one is configured, not local HEAD, silently dropping local-only
-// commits. Creating it ourselves and pointing RepoPath (-> cmd.Dir) straight
-// at it sidesteps that entirely, and also means WorktreePath is known
-// synchronously here rather than waited on from the run's first event.
+// A fresh run creates the worktree itself (see resolveTaskWorktree, which
+// calls createWorktree in complete.go) rather than asking claude to via
+// -w/--worktree: confirmed directly that -w forks from the repo's
+// remote-tracking default branch when one is configured, not local HEAD,
+// silently dropping local-only commits. Creating it ourselves and pointing
+// RepoPath (-> cmd.Dir) straight at it sidesteps that entirely, and also
+// means WorktreePath is known synchronously here rather than waited on from
+// the run's first event. If the task was already planned, this reuses the
+// same worktree the plan run opened (see resolveTaskWorktree).
 func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) tea.Cmd {
 	repoPath, ok := m.repoPath(t.RepoID)
 	if !ok || repoPath == "" {
@@ -1150,38 +1228,14 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 		return nil
 	}
 
-	sessionID := resumeSessionID
-	wtName := t.WorktreeName
-	baseRef := t.WorktreeBaseRef
-	worktreePath := t.WorktreePath
+	worktreePath, wtName, baseRef, ok := m.resolveTaskWorktree(t, repoPath, resumeSessionID)
+	if !ok {
+		return nil
+	}
 
+	sessionID := resumeSessionID
 	if sessionID == "" {
 		sessionID = uuid.NewString()
-		targetBranch := t.TargetBranch
-		if targetBranch == "" {
-			// Back-compat: tasks created before the target-branch wizard
-			// existed have no TargetBranch on record, so fall back to the
-			// old scheme of naming the branch after the task itself.
-			targetBranch = worktreeName(t)
-		}
-		wtName = targetBranch
-		baseRef = gitHeadRef(repoPath)
-
-		if existing, ok := findWorktreeForBranch(repoPath, targetBranch); ok {
-			m.appendLogLine(t.ID, logCormakeLine("reusing existing worktree already open on branch "+targetBranch))
-			worktreePath = existing
-		} else {
-			path, err := createWorktree(repoPath, targetBranch)
-			if err != nil {
-				m.appendLogLine(t.ID, logCormakeLine("failed to create worktree: "+err.Error()))
-				return nil
-			}
-			worktreePath = path
-		}
-	}
-	if worktreePath == "" {
-		m.appendLogLine(t.ID, logCormakeLine("cannot resume — task has no worktree"))
-		return nil
 	}
 
 	spec := agent.RunSpec{
@@ -1497,12 +1551,14 @@ func (m *Model) setPlanFilePath(taskID, path string) {
 // execute or a later review-feedback revise) also gets committed here,
 // success or not — one commit per attempt rather than everything staying
 // squashed until the eventual completeTaskCmd commit, so a task's worktree
-// history is easy to step through attempt by attempt during review. The
-// commit body is ResultSummary, the claude-authored description of what
-// that particular attempt actually changed (see executeSummaryInstruction
-// and handleAgentEvent's EventResult case) — freshly overwritten by this
-// run's own EventResult before taskFinishedMsg ever arrives here, so it
-// describes this attempt specifically rather than some earlier one.
+// history is easy to step through attempt by attempt during review. Plan
+// runs are excluded even though they now have a worktree too (see
+// resolveTaskWorktree) — plan-mode never writes into it. The commit body is
+// ResultSummary, the claude-authored description of what that particular
+// attempt actually changed (see executeSummaryInstruction and
+// handleAgentEvent's EventResult case) — freshly overwritten by this run's
+// own EventResult before taskFinishedMsg ever arrives here, so it describes
+// this attempt specifically rather than some earlier one.
 func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 	delete(m.active, msg.TaskID)
 	sawResult := m.resultSeen[msg.TaskID]
@@ -1513,6 +1569,15 @@ func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 			continue
 		}
 		m.tasks[i].PID = 0
+		// Captured before the switch below overwrites Status: a plan-mode
+		// run never touches the worktree's tracked files (claude's plan-mode
+		// only ever writes the plan doc itself, and always to
+		// ~/.claude/plans/, never into the worktree — see
+		// domain.Task.PlanFilePath), so it's excluded from the
+		// commit-per-attempt block below regardless of outcome — there's
+		// nothing to commit, and counting it would leave a gap in the
+		// attempt numbering with no matching commit.
+		wasPlanning := m.tasks[i].Status == domain.StatusPlanning
 		switch {
 		case msg.Err != nil:
 			m.tasks[i].Status = domain.StatusFailed
@@ -1525,7 +1590,7 @@ func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 		case m.tasks[i].Status == domain.StatusInProgress:
 			m.tasks[i].Status = domain.StatusReadyForReview
 		}
-		if m.tasks[i].WorktreePath != "" {
+		if !wasPlanning && m.tasks[i].WorktreePath != "" {
 			m.tasks[i].ExecutionAttempts++
 			commitMsg := fmt.Sprintf("cormake: %s (attempt %d)", m.tasks[i].Title, m.tasks[i].ExecutionAttempts)
 			if summary := strings.TrimSpace(m.tasks[i].ResultSummary); summary != "" {

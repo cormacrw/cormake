@@ -18,10 +18,11 @@ const (
 	RunModeComplete RunMode = "complete"
 )
 
-// RunSpec is everything needed to start one run. For RunModeComplete,
-// RepoPath is the caller's responsibility to point at a disposable git
-// worktree rather than the actual checkout — this package has no notion of
-// worktrees itself, it just runs claude wherever RepoPath says.
+// RunSpec is everything needed to start one run. RepoPath is the caller's
+// responsibility to point at a disposable git worktree rather than the
+// actual checkout, for both RunModePlan and RunModeComplete — this package
+// has no notion of worktrees itself, it just runs claude wherever RepoPath
+// says.
 type RunSpec struct {
 	TaskID       string
 	SessionID    string
