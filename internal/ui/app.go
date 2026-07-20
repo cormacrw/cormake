@@ -24,6 +24,7 @@ import (
 	"cormake/internal/agent/claude"
 	"cormake/internal/agent/cursor"
 	"cormake/internal/domain"
+	"cormake/internal/logformat"
 	"cormake/internal/store"
 	"cormake/internal/ui/detail"
 	"cormake/internal/ui/tasklist"
@@ -245,7 +246,7 @@ func (m Model) runnerFor(backend domain.AgentBackend) agent.Runner {
 
 // taskAgentBackend looks up taskID's own AgentBackend — used by
 // handleAgentEvent to label log lines with the backend that actually
-// produced them (see formatAgentLogLine), since agent.Event itself is
+// produced them (see logformat.FormatAgentLogLine), since agent.Event itself is
 // deliberately backend-neutral and carries no such field.
 func (m Model) taskAgentBackend(taskID string) domain.AgentBackend {
 	for _, t := range m.tasks {
@@ -705,7 +706,7 @@ func (m *Model) openInputModal() tea.Cmd {
 	}
 	m.inputTaskID = t.ID
 	m.inputTextarea.Reset()
-	m.inputTextarea.Placeholder = "Type a message to send to " + agentBackendLabel(t.AgentBackend) + "..."
+	m.inputTextarea.Placeholder = "Type a message to send to " + logformat.AgentBackendLabel(t.AgentBackend) + "..."
 	m.inputModalOpen = true
 	return m.inputTextarea.Focus()
 }
@@ -745,7 +746,7 @@ func (m *Model) sendInputPrompt(message string) tea.Cmd {
 		if t.ID != m.inputTaskID {
 			continue
 		}
-		m.appendLogLine(t.ID, logCormakeLine("sending message to "+agentBackendLabel(t.AgentBackend)))
+		m.appendLogLine(t.ID, logformat.LogCormakeLine("sending message to "+logformat.AgentBackendLabel(t.AgentBackend)))
 		if t.Status == domain.StatusReadyForReview {
 			return m.runExecuteAgent(t, message+executeSummaryInstruction, t.SessionID)
 		}
@@ -776,14 +777,14 @@ func (m *Model) startCompleteTask() tea.Cmd {
 	}
 	repoPath, ok := m.repoPath(target.RepoID)
 	if !ok || repoPath == "" {
-		m.appendLogLine(target.ID, logCormakeLine("cannot complete — task has no repo assigned"))
+		m.appendLogLine(target.ID, logformat.LogCormakeLine("cannot complete — task has no repo assigned"))
 		return nil
 	}
 	branch := target.TargetBranch
 	if branch == "" {
 		branch = target.WorktreeName
 	}
-	m.appendLogLine(target.ID, logCormakeLine("finalizing onto branch "+branch))
+	m.appendLogLine(target.ID, logformat.LogCormakeLine("finalizing onto branch "+branch))
 	return completeTaskCmd(target.ID, repoPath, target.WorktreePath, branch, "cormake: "+target.Title)
 }
 
@@ -795,7 +796,7 @@ func (m *Model) startCompleteTask() tea.Cmd {
 // worktree intact — so nothing is lost and completing can be retried.
 func (m *Model) handleCompleteFinished(msg completeFinishedMsg) {
 	if msg.err != nil {
-		m.appendLogLine(msg.taskID, logCormakeLine("failed to complete: "+msg.err.Error()))
+		m.appendLogLine(msg.taskID, logformat.LogCormakeLine("failed to complete: "+msg.err.Error()))
 		return
 	}
 	for i := range m.tasks {
@@ -1145,19 +1146,19 @@ func (m *Model) resolveTaskWorktree(t domain.Task, repoPath, resumeSessionID str
 		baseRef = gitHeadRef(repoPath)
 
 		if existing, found := findWorktreeForBranch(repoPath, targetBranch); found {
-			m.appendLogLine(t.ID, logCormakeLine("reusing existing worktree already open on branch "+targetBranch))
+			m.appendLogLine(t.ID, logformat.LogCormakeLine("reusing existing worktree already open on branch "+targetBranch))
 			worktreePath = existing
 		} else {
 			path, err := createWorktree(repoPath, targetBranch)
 			if err != nil {
-				m.appendLogLine(t.ID, logCormakeLine("failed to create worktree: "+err.Error()))
+				m.appendLogLine(t.ID, logformat.LogCormakeLine("failed to create worktree: "+err.Error()))
 				return "", "", "", false
 			}
 			worktreePath = path
 		}
 	}
 	if worktreePath == "" {
-		m.appendLogLine(t.ID, logCormakeLine("cannot resume — task has no worktree"))
+		m.appendLogLine(t.ID, logformat.LogCormakeLine("cannot resume — task has no worktree"))
 		return "", "", "", false
 	}
 	return worktreePath, wtName, baseRef, true
@@ -1180,11 +1181,11 @@ func (m *Model) resolveTaskWorktree(t domain.Task, repoPath, resumeSessionID str
 func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.Cmd {
 	repoPath, ok := m.repoPath(t.RepoID)
 	if !ok || repoPath == "" {
-		m.appendLogLine(t.ID, logCormakeLine("cannot start — task has no repo assigned"))
+		m.appendLogLine(t.ID, logformat.LogCormakeLine("cannot start — task has no repo assigned"))
 		return nil
 	}
 	if limit := m.workspaces[m.activeWS].EffectiveMaxConcurrentAgents(); m.activeAgentCount(t.WorkspaceID) >= limit {
-		m.appendLogLine(t.ID, logCormakeLine(fmt.Sprintf("cannot start — workspace agent limit reached (%d running)", limit)))
+		m.appendLogLine(t.ID, logformat.LogCormakeLine(fmt.Sprintf("cannot start — workspace agent limit reached (%d running)", limit)))
 		return nil
 	}
 
@@ -1210,7 +1211,7 @@ func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.
 
 	handle, err := m.runnerFor(t.AgentBackend).Start(context.Background(), spec)
 	if err != nil {
-		m.appendLogLine(t.ID, logCormakeLine("failed to start: "+err.Error()))
+		m.appendLogLine(t.ID, logformat.LogCormakeLine("failed to start: "+err.Error()))
 		return nil
 	}
 
@@ -1277,11 +1278,11 @@ func (m *Model) startExecuteRun() tea.Cmd {
 func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) tea.Cmd {
 	repoPath, ok := m.repoPath(t.RepoID)
 	if !ok || repoPath == "" {
-		m.appendLogLine(t.ID, logCormakeLine("cannot start — task has no repo assigned"))
+		m.appendLogLine(t.ID, logformat.LogCormakeLine("cannot start — task has no repo assigned"))
 		return nil
 	}
 	if limit := m.workspaces[m.activeWS].EffectiveMaxConcurrentAgents(); m.activeAgentCount(t.WorkspaceID) >= limit {
-		m.appendLogLine(t.ID, logCormakeLine(fmt.Sprintf("cannot start — workspace agent limit reached (%d running)", limit)))
+		m.appendLogLine(t.ID, logformat.LogCormakeLine(fmt.Sprintf("cannot start — workspace agent limit reached (%d running)", limit)))
 		return nil
 	}
 
@@ -1310,7 +1311,7 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 
 	handle, err := m.runnerFor(t.AgentBackend).Start(context.Background(), spec)
 	if err != nil {
-		m.appendLogLine(t.ID, logCormakeLine("failed to start: "+err.Error()))
+		m.appendLogLine(t.ID, logformat.LogCormakeLine("failed to start: "+err.Error()))
 		return nil
 	}
 
@@ -1382,7 +1383,7 @@ func shortTaskID(id string) string {
 // rather than two.
 func (m *Model) handleRevdiffFinished(msg revdiffFinishedMsg) tea.Cmd {
 	if msg.err != nil {
-		m.appendLogLine(msg.taskID, logCormakeLine("revdiff failed: "+msg.err.Error()))
+		m.appendLogLine(msg.taskID, logformat.LogCormakeLine("revdiff failed: "+msg.err.Error()))
 		return nil
 	}
 	if msg.annotations == "" {
@@ -1393,7 +1394,7 @@ func (m *Model) handleRevdiffFinished(msg revdiffFinishedMsg) tea.Cmd {
 		if t.ID != msg.taskID {
 			continue
 		}
-		m.appendLogLine(t.ID, logCormakeLine("sending review feedback to "+agentBackendLabel(t.AgentBackend)+" for revision"))
+		m.appendLogLine(t.ID, logformat.LogCormakeLine("sending review feedback to "+logformat.AgentBackendLabel(t.AgentBackend)+" for revision"))
 		if msg.kind == reviewKindExecute {
 			return m.runExecuteAgent(t, buildExecuteRevisePrompt(msg.annotations), t.SessionID)
 		}
@@ -1500,10 +1501,10 @@ func forwardEvents(eventsCh chan<- tea.Msg, taskID string, h *agent.Handle) {
 // handleAgentEvent appends a formatted line to the task's live log for
 // every event type (see logformat.go for how each kind renders), and
 // separately handles whatever side effect that event type carries — none of
-// which affect how the line reads, so they're kept out of formatAgentLogLine
+// which affect how the line reads, so they're kept out of logformat.FormatAgentLogLine
 // entirely.
 func (m *Model) handleAgentEvent(ev agent.Event) {
-	m.appendLogLine(ev.TaskID, formatAgentLogLine(ev, m.taskAgentBackend(ev.TaskID)))
+	m.appendLogLine(ev.TaskID, logformat.FormatAgentLogLine(ev, m.taskAgentBackend(ev.TaskID)))
 
 	switch ev.Type {
 	case agent.EventToolUse:
@@ -1675,7 +1676,7 @@ func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 				commitMsg += "\n\n" + summary
 			}
 			if err := commitWorktreeChanges(m.tasks[i].WorktreePath, commitMsg); err != nil {
-				m.appendLogLine(m.tasks[i].ID, logCormakeLine("failed to commit execution attempt: "+err.Error()))
+				m.appendLogLine(m.tasks[i].ID, logformat.LogCormakeLine("failed to commit execution attempt: "+err.Error()))
 			}
 		}
 		m.persistTask(m.tasks[i])
@@ -1746,7 +1747,7 @@ func (m *Model) reconnectTask(taskID string) tea.Cmd {
 			Offset:        offset,
 		})
 		if err == nil {
-			m.appendLogLine(t.ID, logCormakeLine(fmt.Sprintf("cormake restarted — reattaching to still-running session (pid %d)", t.PID)))
+			m.appendLogLine(t.ID, logformat.LogCormakeLine(fmt.Sprintf("cormake restarted — reattaching to still-running session (pid %d)", t.PID)))
 			m.active[t.ID] = handle
 			go forwardEvents(m.eventsCh, t.ID, handle)
 			return m.ensureSpinnerTicking()
@@ -1766,19 +1767,19 @@ func (m *Model) reconnectTask(taskID string) tea.Cmd {
 		fmt.Fprintln(os.Stderr, "cormake: failed to save offset for", t.ID+":", err)
 	}
 	if m.resultSeen[t.ID] {
-		m.appendLogLine(t.ID, logCormakeLine("cormake restarted — the run had already finished"))
+		m.appendLogLine(t.ID, logformat.LogCormakeLine("cormake restarted — the run had already finished"))
 		m.handleTaskFinished(taskFinishedMsg{TaskID: t.ID})
 		return nil
 	}
 
-	m.appendLogLine(t.ID, logCormakeLine("cormake restarted — reconnecting to interrupted session"))
+	m.appendLogLine(t.ID, logformat.LogCormakeLine("cormake restarted — reconnecting to interrupted session"))
 
 	switch t.Status {
 	case domain.StatusPlanning:
 		return m.runPlanAgent(t, reconnectPlanPrompt, t.SessionID)
 	case domain.StatusInProgress:
 		if t.WorktreePath == "" {
-			m.appendLogLine(t.ID, logCormakeLine("cannot reconnect — task has no worktree on record"))
+			m.appendLogLine(t.ID, logformat.LogCormakeLine("cannot reconnect — task has no worktree on record"))
 			return nil
 		}
 		return m.runExecuteAgent(t, reconnectExecutePrompt, t.SessionID)
@@ -2036,7 +2037,7 @@ func swatchColor(c string) string {
 // full screen.
 func (m Model) renderInputModal() string {
 	lines := []string{
-		"Send a message to " + agentBackendLabel(m.taskAgentBackend(m.inputTaskID)), "",
+		"Send a message to " + logformat.AgentBackendLabel(m.taskAgentBackend(m.inputTaskID)), "",
 		m.inputTextarea.View(), "",
 		tabInfoStyle.Render("[ctrl+s] send   [esc] cancel"),
 	}

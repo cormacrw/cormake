@@ -1,10 +1,11 @@
-package ui
+package logformat
 
 import (
 	"encoding/json"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"cormake/internal/agent"
 	"cormake/internal/domain"
@@ -12,9 +13,9 @@ import (
 )
 
 // Log line styles, one per kind of thing that shows up in a task's Log tab.
-// Colors follow the same 256-color palette already used elsewhere in this
-// package (212 pink accent, 245/240 muted grays) so the log doesn't look
-// like it belongs to a different app.
+// Colors follow the same 256-color palette already used elsewhere in the UI
+// (212 pink accent, 245/240 muted grays) so the log doesn't look like it
+// belongs to a different app.
 var (
 	logMetaStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	logAssistantStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
@@ -29,12 +30,12 @@ func logCormakeStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(theme.Accent())
 }
 
-// agentBackendLabel returns the human-facing name for backend — "claude" or
+// AgentBackendLabel returns the human-facing name for backend — "claude" or
 // "cursor" — used everywhere the UI needs to say which agent it's talking
 // to (log lines, the input modal, its textarea placeholder). Empty/
 // unrecognized values read as "claude", the same fallback convention as
 // Model.runnerFor/Workspace.EffectiveDefaultAgentBackend.
-func agentBackendLabel(backend domain.AgentBackend) string {
+func AgentBackendLabel(backend domain.AgentBackend) string {
 	if backend == domain.AgentBackendCursor {
 		return "cursor"
 	}
@@ -49,56 +50,93 @@ const (
 	maxToolResultChars = 1200
 )
 
-// formatAgentLogLine turns a raw agent.Event into the styled, human-readable
-// text appended to a task's Log tab. backend picks the "● claude"/"● cursor"
-// label on assistant text lines — it's the task's own AgentBackend, not
-// derivable from ev itself (agent.Event is deliberately backend-neutral).
-// Kept separate from handleAgentEvent's side effects (capturing
-// PlanFilePath, ResultSummary, WorktreePath, ...) — this only decides how
-// the event reads, not what it means.
-func formatAgentLogLine(ev agent.Event, backend domain.AgentBackend) string {
+// FormatAgentLogLine turns a raw agent.Event into the plain, human-readable
+// text appended to a task's Log tab. Styling and width wrapping happen at
+// render time via RenderLogLine so wrapped continuation lines keep their
+// color. backend picks the "● claude"/"● cursor" label on assistant text
+// lines — it's the task's own AgentBackend, not derivable from ev itself
+// (agent.Event is deliberately backend-neutral).
+func FormatAgentLogLine(ev agent.Event, backend domain.AgentBackend) string {
 	switch ev.Type {
 	case agent.EventInit:
-		return logMetaStyle.Render("▸ session started — model " + ev.Text)
+		return "▸ session started — model " + ev.Text
 
 	case agent.EventText:
-		label := "● " + agentBackendLabel(backend)
-		style := logAssistantStyle
+		label := "● " + AgentBackendLabel(backend)
 		if ev.IsSubagent {
-			style, label = logSubagentStyle, "◦ subagent"
+			label = "◦ subagent"
 		}
 		// A leading blank line visually separates each new turn from
 		// whatever tool activity preceded it, instead of one unbroken wall
 		// of text.
-		return "\n" + style.Render(label+"  "+ev.Text)
+		return "\n" + label + "  " + ev.Text
 
 	case agent.EventToolUse:
-		return logToolStyle.Render("  ⚙ " + describeToolUse(ev.ToolName, ev.ToolInput))
+		return "  ⚙ " + describeToolUse(ev.ToolName, ev.ToolInput)
 
 	case agent.EventToolResult:
 		body := truncateBlock(ev.Text, maxToolResultLines, maxToolResultChars)
-		return logToolResultStyle.Render(indentBlock("    ", body))
+		return indentBlock("    ", body)
 
 	case agent.EventResult:
-		return "\n" + logResultStyle.Render("✔ "+ev.ResultText)
+		return "\n" + "✔ " + ev.ResultText
 
 	case agent.EventStderrLine:
-		return logErrorStyle.Render("  ⚠ " + ev.Text)
+		return "  ⚠ " + ev.Text
 
 	case agent.EventProcessError:
-		return logErrorStyle.Render("✖ " + ev.Err.Error())
+		return "✖ " + ev.Err.Error()
 
 	default:
 		return ev.Text
 	}
 }
 
-// logCormakeLine styles one of cormake's own status lines (distinct from
-// anything claude said) in the same accent color used for the active tab
-// elsewhere in the app, so it reads as "the app talking" rather than another
-// tool_result.
-func logCormakeLine(msg string) string {
-	return logCormakeStyle().Render("cormake: " + msg)
+// LogCormakeLine returns one of cormake's own status lines (distinct from
+// anything claude said). Styling is applied at render time via RenderLogLine.
+func LogCormakeLine(msg string) string {
+	return "cormake: " + msg
+}
+
+// RenderLogLine styles and optionally word-wraps one stored log entry for
+// display. Lines are stored as plain text; older persisted logs that still
+// contain ANSI codes are stripped and re-styled from their visible prefix.
+func RenderLogLine(line string, width int) string {
+	plain := line
+	if strings.Contains(line, "\x1b") || strings.Contains(line, "\x9b") {
+		plain = ansi.Strip(line)
+	}
+	style := styleForLine(plain)
+	if width > 0 {
+		return style.Width(width).Render(plain)
+	}
+	return style.Render(plain)
+}
+
+func styleForLine(plain string) lipgloss.Style {
+	body := strings.TrimLeft(plain, "\n")
+	switch {
+	case strings.HasPrefix(body, "cormake: "):
+		return logCormakeStyle()
+	case strings.HasPrefix(body, "✖ "):
+		return logErrorStyle
+	case strings.HasPrefix(body, "✔ "):
+		return logResultStyle
+	case strings.HasPrefix(body, "▸ session started"):
+		return logMetaStyle
+	case strings.HasPrefix(body, "◦ subagent"):
+		return logSubagentStyle
+	case strings.HasPrefix(body, "● "):
+		return logAssistantStyle
+	case strings.HasPrefix(body, "  ⚙ "):
+		return logToolStyle
+	case strings.HasPrefix(body, "  ⚠ "):
+		return logErrorStyle
+	case strings.HasPrefix(body, "    "):
+		return logToolResultStyle
+	default:
+		return lipgloss.NewStyle()
+	}
 }
 
 // describeToolUse renders a tool_use call the way a human would want to
@@ -155,9 +193,6 @@ func describeToolUse(name, inputJSON string) string {
 	return name + " " + oneLine(inputJSON)
 }
 
-// oneLine collapses a string to a single line (in case a raw JSON blob or
-// command string has embedded newlines) and caps its length — a fallback
-// display, not meant to be read in full.
 func oneLine(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
 	const max = 160
@@ -167,9 +202,6 @@ func oneLine(s string) string {
 	return s
 }
 
-// truncateBlock caps a multi-line blob to at most maxLines lines and
-// maxChars characters, whichever comes first, marking the result as cut off
-// when either limit was hit.
 func truncateBlock(s string, maxLines, maxChars int) string {
 	s = strings.TrimRight(s, "\n")
 	if s == "" {
@@ -193,8 +225,6 @@ func truncateBlock(s string, maxLines, maxChars int) string {
 	return out
 }
 
-// indentBlock prefixes every line of s with prefix, for nesting a
-// tool_result visually under the tool_use line that produced it.
 func indentBlock(prefix, s string) string {
 	lines := strings.Split(s, "\n")
 	for i, l := range lines {

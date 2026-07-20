@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"cormake/internal/domain"
+	"cormake/internal/logformat"
 	"cormake/internal/ui/theme"
 )
 
@@ -191,22 +192,23 @@ func (m *Model) syncViewportContent() {
 	}
 }
 
-// renderLog joins a task's stored log lines and wraps the result to the
-// pane's current width. Wrapping happens here, at render time, rather than
-// baked into each line when it's stored — m.logs may include lines loaded
-// back from a previous session (see AppendLogLine), persisted at whatever
-// width was current then, or none at all; wrapping fresh on every render
-// keeps it honest for the terminal size actually in front of the user now.
-// The viewport itself doesn't wrap: anything wider than it just overflows
-// and gets hard-clipped by the terminal at whatever column it hits,
-// mid-word, even slicing into the pane's own border character (confirmed
-// directly).
+// renderLog joins a task's stored log lines, styling and wrapping each
+// entry to the pane's current width. Wrapping happens here, at render time,
+// rather than baked into each line when it's stored — m.logs may include lines
+// loaded back from a previous session (see AppendLogLine), including older
+// entries that were persisted with inline ANSI styling; wrapping fresh on
+// every render keeps width honest for the terminal size in front of the
+// user now, and applying style after wrap keeps continuation lines colored.
 func (m Model) renderLog(taskID string) string {
-	content := strings.Join(m.logs[taskID], "\n")
-	if m.width > 0 {
-		content = lipgloss.NewStyle().Width(m.width).Render(content)
+	lines := m.logs[taskID]
+	if len(lines) == 0 {
+		return ""
 	}
-	return content
+	wrapped := make([]string, len(lines))
+	for i, line := range lines {
+		wrapped[i] = logformat.RenderLogLine(line, m.width)
+	}
+	return strings.Join(wrapped, "\n")
 }
 
 // AppendLogLine adds a line to a task's log, live — used while a task is
