@@ -140,10 +140,21 @@ func translateLine(taskID string, line []byte) []agent.Event {
 				ToolName: toolName, ToolInput: string(detail.Args),
 			}}
 		case "completed":
-			return []agent.Event{{
+			events := []agent.Event{{
 				TaskID: taskID, Type: agent.EventToolResult,
 				Text: string(detail.Result),
 			}}
+			// createPlanToolCall sometimes arrives with empty args on
+			// "started" but the full revised plan only on "completed"
+			// (confirmed on plan-feedback resume runs) — emit a second
+			// tool_use so cormake can persist the updated markdown.
+			if toolName == "createPlanToolCall" && len(detail.Args) > 0 && string(detail.Args) != "null" {
+				events = append([]agent.Event{{
+					TaskID: taskID, Type: agent.EventToolUse,
+					ToolName: toolName, ToolInput: string(detail.Args),
+				}}, events...)
+			}
+			return events
 		default:
 			return nil
 		}

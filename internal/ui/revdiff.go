@@ -156,12 +156,20 @@ func openRevdiffDiffCmd(taskID, worktreePath, baseRef, resultSummary string) tea
 
 // buildRevisePrompt turns raw revdiff annotation output (format: "##
 // <label>:<line>" followed by the note on the next line, one block per
-// annotation) into a follow-up prompt asking claude to revise its plan.
-func buildRevisePrompt(annotations string) string {
-	return "Here is feedback on the plan you just proposed, as inline review annotations " +
+// annotation) into a follow-up prompt asking the agent to revise its plan.
+// planFilePath, when set, tells the agent where cormake reads the plan from
+// so a revision must rewrite that file (or call createPlanToolCall with the
+// full revised text) — not just claim success in prose.
+func buildRevisePrompt(annotations, planFilePath string) string {
+	out := "Here is feedback on the plan you just proposed, as inline review annotations " +
 		"(each is a \"## <label>:<line>\" heading followed by the note):\n\n" +
 		annotations +
 		"\n\nPlease revise the plan to address this feedback."
+	if planFilePath != "" {
+		out += "\n\nThe current plan file is at " + planFilePath +
+			" — overwrite it with the complete revised plan. Do not reply that the plan is updated unless you have actually written the new plan content."
+	}
+	return out
 }
 
 // buildExecuteRevisePrompt turns revdiff annotations left on the actual code

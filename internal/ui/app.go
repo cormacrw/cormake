@@ -1397,7 +1397,7 @@ func (m *Model) handleRevdiffFinished(msg revdiffFinishedMsg) tea.Cmd {
 		if msg.kind == reviewKindExecute {
 			return m.runExecuteAgent(t, buildExecuteRevisePrompt(msg.annotations), t.SessionID)
 		}
-		return m.runPlanAgent(t, buildRevisePrompt(msg.annotations), t.SessionID)
+		return m.runPlanAgent(t, buildRevisePrompt(msg.annotations, t.PlanFilePath), t.SessionID)
 	}
 	return nil
 }
@@ -1569,10 +1569,8 @@ func (m *Model) updateTaskSessionID(taskID, sessionID string) {
 }
 
 // setPlanFilePath records where a task's plan landed (see planfile.go) and
-// refreshes the detail pane immediately, so the Plan tab can appear or
-// update mid-run rather than only once the whole run finishes. syncDetail
-// always runs even when path is unchanged — plan revisions (cursor
-// createPlanToolCall, claude Edit) rewrite the same file.
+// refreshes the detail pane for that task when it is selected, re-reading
+// plan content from disk so revisions show up on the Plan tab immediately.
 func (m *Model) setPlanFilePath(taskID, path string) {
 	for i := range m.tasks {
 		if m.tasks[i].ID != taskID {
@@ -1582,9 +1580,33 @@ func (m *Model) setPlanFilePath(taskID, path string) {
 			m.tasks[i].PlanFilePath = path
 			m.persistTask(m.tasks[i])
 		}
-		break
+		m.refreshTaskDetail(taskID)
+		return
 	}
-	m.syncDetail()
+}
+
+func (m Model) taskByID(id string) (domain.Task, bool) {
+	for _, t := range m.tasks {
+		if t.ID == id {
+			return t, true
+		}
+	}
+	return domain.Task{}, false
+}
+
+// refreshTaskDetail reloads the detail pane for taskID when that task is
+// currently selected — uses m.tasks (canonical) rather than the tasklist's
+// potentially stale copy, and always re-reads plan content from disk.
+func (m *Model) refreshTaskDetail(taskID string) {
+	t, ok := m.taskByID(taskID)
+	if !ok {
+		return
+	}
+	sel, ok := m.tasklist.Selected()
+	if !ok || sel.ID != taskID {
+		return
+	}
+	m.detail.SetTask(t, m.repoNames[t.RepoID], m.readPlanFile(t))
 }
 
 // handleTaskFinished reacts to a run being over: a successful plan run
@@ -1794,7 +1816,14 @@ func (m *Model) refreshTaskList() {
 		}
 		filtered = append(filtered, t)
 	}
+	selectedID := ""
+	if t, ok := m.tasklist.Selected(); ok {
+		selectedID = t.ID
+	}
 	m.tasklist.SetTasks(filtered)
+	if selectedID != "" {
+		m.tasklist.SelectByID(selectedID)
+	}
 	m.syncDetail()
 }
 
@@ -1825,6 +1854,9 @@ func (m *Model) syncDetail() {
 		}
 		m.detail.SetEmpty(msg)
 		return
+	}
+	if canonical, ok := m.taskByID(t.ID); ok {
+		t = canonical
 	}
 	m.detail.SetTask(t, m.repoNames[t.RepoID], m.readPlanFile(t))
 }

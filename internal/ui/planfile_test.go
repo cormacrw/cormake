@@ -7,6 +7,8 @@ import (
 
 	"cormake/internal/domain"
 	"cormake/internal/store"
+	"cormake/internal/ui/detail"
+	"cormake/internal/ui/tasklist"
 )
 
 func TestExtractClaudePlanFilePath(t *testing.T) {
@@ -121,6 +123,34 @@ func TestHandlePlanToolUseRevisesExistingCursorPlan(t *testing.T) {
 	}
 	if got := m.readPlanFile(m.tasks[0]); got != "# Revised\n\nupdated per feedback" {
 		t.Errorf("readPlanFile = %q, want revised content", got)
+	}
+}
+
+func TestRefreshTaskDetailUsesCanonicalTaskPlanPath(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	planPath := st.PlanPath("task-1")
+	if err := os.WriteFile(planPath, []byte("# On disk\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	task := domain.Task{ID: "task-1", Title: "Test", PlanFilePath: planPath}
+	m := Model{
+		store:    st,
+		tasks:    []domain.Task{task},
+		tasklist: tasklist.New([]domain.Task{{ID: "task-1", Title: "Test"}}), // stale: no PlanFilePath
+		detail:   detail.New(map[string][]string{}),
+	}
+	m.detail.SetSize(80, 24)
+
+	m.refreshTaskDetail("task-1")
+
+	if got := m.detail.HasPlan(); !got {
+		t.Fatal("detail pane should show plan from canonical m.tasks state")
 	}
 }
 

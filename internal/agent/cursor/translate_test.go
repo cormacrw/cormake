@@ -84,6 +84,23 @@ func TestTranslateLineToolCallCompleted(t *testing.T) {
 	}
 }
 
+func TestTranslateLineCreatePlanToolCallCompleted(t *testing.T) {
+	line := `{"type":"tool_call","subtype":"completed","call_id":"call-1","tool_call":{"createPlanToolCall":{"args":{"plan":"# Revised\n"},"result":{"success":{},"planUri":""}}}}`
+	events := translateLine("task-1", []byte(line))
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2", len(events))
+	}
+	if events[0].Type != agent.EventToolUse || events[0].ToolName != "createPlanToolCall" {
+		t.Fatalf("first event = %+v, want createPlanToolCall tool_use", events[0])
+	}
+	if events[0].ToolInput != `{"plan":"# Revised\n"}` {
+		t.Errorf("ToolInput = %q, want plan args", events[0].ToolInput)
+	}
+	if events[1].Type != agent.EventToolResult {
+		t.Errorf("second event Type = %v, want EventToolResult", events[1].Type)
+	}
+}
+
 func TestTranslateLineThinkingDropped(t *testing.T) {
 	for _, line := range []string{
 		`{"type":"thinking","subtype":"delta","text":"reasoning..."}`,
