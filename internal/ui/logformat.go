@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"cormake/internal/agent"
+	"cormake/internal/domain"
 	"cormake/internal/ui/theme"
 )
 
@@ -37,16 +38,23 @@ const (
 )
 
 // formatAgentLogLine turns a raw agent.Event into the styled, human-readable
-// text appended to a task's Log tab. Kept separate from handleAgentEvent's
-// side effects (capturing PlanFilePath, ResultSummary, WorktreePath, ...) —
-// this only decides how the event reads, not what it means.
-func formatAgentLogLine(ev agent.Event) string {
+// text appended to a task's Log tab. backend picks the "● claude"/"● cursor"
+// label on assistant text lines — it's the task's own AgentBackend, not
+// derivable from ev itself (agent.Event is deliberately backend-neutral).
+// Kept separate from handleAgentEvent's side effects (capturing
+// PlanFilePath, ResultSummary, WorktreePath, ...) — this only decides how
+// the event reads, not what it means.
+func formatAgentLogLine(ev agent.Event, backend domain.AgentBackend) string {
 	switch ev.Type {
 	case agent.EventInit:
 		return logMetaStyle.Render("▸ session started — model " + ev.Text)
 
 	case agent.EventText:
-		style, label := logAssistantStyle, "● claude"
+		label := "● claude"
+		if backend == domain.AgentBackendCursor {
+			label = "● cursor"
+		}
+		style := logAssistantStyle
 		if ev.IsSubagent {
 			style, label = logSubagentStyle, "◦ subagent"
 		}

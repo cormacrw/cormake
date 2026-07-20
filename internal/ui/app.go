@@ -243,6 +243,19 @@ func (m Model) runnerFor(backend domain.AgentBackend) agent.Runner {
 	return m.runners[domain.AgentBackendClaude]
 }
 
+// taskAgentBackend looks up taskID's own AgentBackend — used by
+// handleAgentEvent to label log lines with the backend that actually
+// produced them (see formatAgentLogLine), since agent.Event itself is
+// deliberately backend-neutral and carries no such field.
+func (m Model) taskAgentBackend(taskID string) domain.AgentBackend {
+	for _, t := range m.tasks {
+		if t.ID == taskID {
+			return t.AgentBackend
+		}
+	}
+	return domain.AgentBackendClaude
+}
+
 // replayFileFor resolves backend to the ReplayFile func that knows how to
 // parse that backend's own stream-json dialect (see reconnectTask) — unlike
 // ProcessAlive (a dialect-free PID check, so claude.ProcessAlive is reused
@@ -1487,7 +1500,7 @@ func forwardEvents(eventsCh chan<- tea.Msg, taskID string, h *agent.Handle) {
 // which affect how the line reads, so they're kept out of formatAgentLogLine
 // entirely.
 func (m *Model) handleAgentEvent(ev agent.Event) {
-	m.appendLogLine(ev.TaskID, formatAgentLogLine(ev))
+	m.appendLogLine(ev.TaskID, formatAgentLogLine(ev, m.taskAgentBackend(ev.TaskID)))
 
 	switch ev.Type {
 	case agent.EventToolUse:
