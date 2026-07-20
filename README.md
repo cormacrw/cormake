@@ -1,13 +1,15 @@
 # cormake
 
-A terminal "command center" for delegating coding work to [Claude](https://claude.com). Create a task, point it at a git repo, and choose **plan** mode (Claude researches the codebase and proposes an approach without touching code) or **execute** mode (Claude works autonomously inside an isolated git worktree).
+A terminal "command center" for delegating coding work to [Claude](https://claude.com) or [Cursor](https://cursor.com). Create a task, point it at a git repo, and choose **plan** mode (the agent researches the codebase and proposes an approach without touching code) or **execute** mode (the agent works autonomously inside an isolated git worktree).
 
 See [VISION.md](VISION.md) for the full design rationale and architecture.
 
 ## Requirements
 
 - Go 1.20+
-- The `claude` CLI installed and authenticated
+- At least one supported agent CLI installed and authenticated:
+  - [Claude Code](https://claude.com/product/claude-code) (`claude`)
+  - [Cursor](https://cursor.com) (`cursor-agent`)
 
 ## Build & run
 
@@ -25,6 +27,21 @@ go run ./cmd/cormake
 ## Storage
 
 All state — workspaces, repos, tasks, session transcripts — is stored as flat JSON under `~/.cormake` (override with the `CORMAKE_HOME` environment variable, useful for tests or trying the app against a scratch directory). There's no server, no database, no account.
+
+## Agent backends
+
+cormake supports two agent CLIs behind the same Plan/Execute workflow:
+
+| Backend | CLI | Config value |
+| --- | --- | --- |
+| Claude | `claude` | `"claude"` |
+| Cursor | `cursor-agent` | `"cursor"` |
+
+Both backends support plan and execute modes, work inside the same git worktrees, and resume their own sessions for review feedback and follow-up messages (`i`).
+
+**Choosing a backend per run.** When you confirm Plan (`p`) or Execute (`e`), the modal shows an agent toggle — press `tab` (or `←`/`→`) to switch between `claude` and `cursor`, then `y` or `enter` to start.
+
+**Workspace default.** Set `DefaultAgentBackend` in [workspace config](#workspace-config) to `"claude"` or `"cursor"` to preselect that backend in the confirmation modal. Omitted defaults to `"claude"`. Each task remembers whichever backend started its session; later resumes always go back to that same agent.
 
 ## Concepts
 
@@ -53,6 +70,7 @@ There's no settings UI yet — per-workspace options are hand-edited directly in
   "NextTaskNumber": 8,
   "MaxConcurrentAgents": 3,
   "DefaultTargetBranch": "main",
+  "DefaultAgentBackend": "cursor",
   "CreatedAt": "2026-01-05T10:00:00Z",
   "UpdatedAt": "2026-01-05T10:00:00Z"
 }
@@ -63,6 +81,7 @@ There's no settings UI yet — per-workspace options are hand-edited directly in
 - `NextTaskNumber` — next sequence number `Prefix` will hand out; doesn't reset when `Prefix` is edited by hand.
 - `MaxConcurrentAgents` — caps how many Plan/Execute agents can run at once across this workspace's tasks. `0` (or omitted) means "unset" and falls back to a default of `1`, not "unlimited" — raise it deliberately if you want more agents running in parallel.
 - `DefaultTargetBranch` — the branch a new task's work should merge into by default; preselected (and listed first) in the new-task wizard's source-branch step. Omitted means "unset" and falls back to `"develop"`.
+- `DefaultAgentBackend` — which agent CLI Plan/Execute runs in this workspace default to in the confirmation modal: `"claude"` or `"cursor"`. Omitted means "unset" and falls back to `"claude"`.
 
 ## Keybindings
 
@@ -72,6 +91,7 @@ There's no settings UI yet — per-workspace options are hand-edited directly in
 | `enter` | Edit selected task's title/body |
 | `p` | Plan (read-only research run) |
 | `e` | Execute (autonomous run in a worktree) |
+| `tab` | Switch agent backend in the Plan/Execute confirmation modal |
 | `r` | Review the task's plan or diff |
 | `m` | Mark a ready-for-review task complete |
 | `a` | Archive / restore a task |
@@ -88,6 +108,6 @@ cmd/cormake/     app entrypoint
 cmd/agentpoc/    throwaway harness for testing the Claude runner in isolation
 internal/domain/ task and workspace data model
 internal/store/  flat-JSON storage layer (atomic writes)
-internal/agent/  agent-backend-agnostic runner boundary, with a Claude CLI implementation
+internal/agent/  agent-backend-agnostic runner boundary, with Claude and Cursor CLI implementations
 internal/ui/     Bubbletea TUI (task list, detail pane, editor, review/diff view)
 ```
