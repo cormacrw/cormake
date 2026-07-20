@@ -123,4 +123,4 @@ var keys = KeyMap{
 	Help:    key.NewBinding(key.WithKeys("?")),
 }
 
-const footerHelp = " [n]ew [enter]edit [p]lan [e]xecute [r]eview [i]nput [m]ark complete [t]arget-branch [s]ource-branch [a]rchive [d]elete [w]orkspaces tabs:1-4/[/] arrows:scroll [?]help [q]uit"
+const footerHelp = " [n]ew [/]filter [enter]edit [p]lan [e]xecute [r]eview [i]nput [m]ark complete [t]arget-branch [s]ource-branch [a]rchive [d]elete [w]orkspaces tabs:1-4/[/] arrows:scroll [?]help [q]uit"

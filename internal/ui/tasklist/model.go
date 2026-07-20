@@ -6,14 +6,21 @@ package tasklist
 
 import (
 	"sort"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/lipgloss"
 
 	"cormake/internal/domain"
 )
+
+// filterBarStyle renders the "/" filter query line shown above the list
+// while a filter is being typed or is applied.
+var filterBarStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
 // Item adapts a domain.Task to bubbles/list.Item. A Header item is an
 // inert divider row (see toItems) rather than a real task.
@@ -41,6 +48,28 @@ type Model struct {
 	// rows — a pointer rather than a plain field so the Delegate value
 	// handed to list.Model at construction time keeps seeing later updates.
 	frame *string
+
+	// tasks holds every task last given to SetTasks, before any filter
+	// query narrows it down — re-filtered (see applyFilter) whenever the
+	// query changes rather than filtering the already-filtered list.
+	tasks []domain.Task
+
+	// filterInput captures the "/" filter query, searched against a task's
+	// title and display ID (see matchingTasks). filtering is true only
+	// while the box is focused and capturing keystrokes — see Filtering,
+	// read by the app shell to route keys straight here instead of treating
+	// them as normal shortcuts (e.g. so typing "e" filters rather than
+	// triggering Execute). The query itself stays applied to the list after
+	// committing (enter) until cleared (esc), even once filtering goes
+	// false again.
+	filterInput textinput.Model
+	filtering   bool
+
+	// width/height are the last full size SetSize was given. The filter
+	// bar, when shown, borrows one row of that for itself, so the
+	// underlying list needs re-sizing whenever the bar appears or
+	// disappears, not just when a new SetSize call comes in.
+	width, height int
 }
 
 func New(tasks []domain.Task) Model {
@@ -54,7 +83,12 @@ func New(tasks []domain.Task) Model {
 	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false)
 	l.DisableQuitKeybindings()
-	m := Model{List: l, spinner: s, frame: frame}
+
+	fi := textinput.New()
+	fi.Prompt = "/"
+	fi.CharLimit = 100
+
+	m := Model{List: l, spinner: s, frame: frame, tasks: tasks, filterInput: fi}
 	m.skipHeader(0)
 	return m
 }
@@ -133,15 +167,119 @@ func toItems(tasks []domain.Task) []list.Item {
 
 // SetTasks rebuilds the list's items, e.g. when the active workspace tab
 // changes, and resets the selection to the top (the first real task, past
-// any leading header — see toItems).
+// any leading header — see toItems). Any active filter query stays applied,
+// narrowing the new task set the same way it narrowed the old one.
 func (m *Model) SetTasks(tasks []domain.Task) {
-	m.List.SetItems(toItems(tasks))
+	m.tasks = tasks
+	m.applyFilter()
 	m.List.Select(0)
 	m.skipHeader(0)
 }
 
+// applyFilter rebuilds the list's items from m.tasks, narrowed by the
+// current filter query if one is set — the single place that keeps the
+// list in sync with either changing.
+func (m *Model) applyFilter() {
+	m.List.SetItems(toItems(matchingTasks(m.tasks, m.filterInput.Value())))
+}
+
+// matchingTasks returns the tasks whose title or display ID contains query
+// (case-insensitive) — all of tasks, unfiltered, if query is blank.
+func matchingTasks(tasks []domain.Task, query string) []domain.Task {
+	query = strings.TrimSpace(strings.ToLower(query))
+	if query == "" {
+		return tasks
+	}
+	matched := make([]domain.Task, 0, len(tasks))
+	for _, t := range tasks {
+		if strings.Contains(strings.ToLower(t.Title), query) || strings.Contains(strings.ToLower(t.DisplayID), query) {
+			matched = append(matched, t)
+		}
+	}
+	return matched
+}
+
+// filterBarVisible reports whether a row needs to be reserved above the
+// list for the filter bar: while actively typing a query, or with a
+// committed query still narrowing the list.
+func (m Model) filterBarVisible() bool {
+	return m.filtering || m.filterInput.Value() != ""
+}
+
+// applySize resizes the underlying list to m.width/height minus the filter
+// bar's row, if it's currently showing.
+func (m *Model) applySize() {
+	h := m.height
+	if m.filterBarVisible() {
+		h--
+	}
+	if h < 0 {
+		h = 0
+	}
+	m.List.SetSize(m.width, h)
+}
+
 func (m *Model) SetSize(w, h int) {
-	m.List.SetSize(w, h)
+	m.width, m.height = w, h
+	promptWidth := lipgloss.Width(m.filterInput.Prompt)
+	if fw := w - promptWidth; fw > 0 {
+		m.filterInput.Width = fw
+	}
+	m.applySize()
+}
+
+// Filtering reports whether the "/" filter box is currently focused and
+// capturing keystrokes — the app shell checks this to route key input
+// straight to Update instead of treating it as a normal shortcut (see
+// ui.Model.Update).
+func (m Model) Filtering() bool { return m.filtering }
+
+// HasActiveFilter reports whether a (possibly no-longer-being-typed) filter
+// query is currently narrowing the list.
+func (m Model) HasActiveFilter() bool { return strings.TrimSpace(m.filterInput.Value()) != "" }
+
+// FilterQuery returns the current filter query, empty if none is set.
+func (m Model) FilterQuery() string { return m.filterInput.Value() }
+
+// startFilter opens the filter box for typing, preserving whatever query
+// (if any) was already applied so it can be refined rather than retyped.
+func (m *Model) startFilter() tea.Cmd {
+	m.filtering = true
+	m.filterInput.CursorEnd()
+	m.applySize()
+	return m.filterInput.Focus()
+}
+
+// updateFiltering handles input while the filter box is focused: esc clears
+// the query entirely and exits, enter keeps whatever's typed applied and
+// exits, anything else is forwarded to the text input and re-narrows the
+// list live, on every keystroke.
+func (m Model) updateFiltering(msg tea.Msg) (Model, tea.Cmd) {
+	if km, ok := msg.(tea.KeyMsg); ok {
+		switch km.String() {
+		case "esc":
+			m.filtering = false
+			m.filterInput.Blur()
+			m.filterInput.SetValue("")
+			m.applyFilter()
+			m.List.Select(0)
+			m.skipHeader(0)
+			m.applySize()
+			return m, nil
+		case "enter":
+			m.filtering = false
+			m.filterInput.Blur()
+			m.applySize()
+			return m, nil
+		}
+	}
+
+	var cmd tea.Cmd
+	m.filterInput, cmd = m.filterInput.Update(msg)
+	m.applyFilter()
+	m.List.Select(0)
+	m.skipHeader(0)
+	return m, cmd
 }
 
 // SelectByID moves the selection to the task with the given ID, if it's
@@ -181,6 +319,14 @@ func (m Model) AtTop() bool {
 }
 
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	if m.filtering {
+		return m.updateFiltering(msg)
+	}
+	if km, ok := msg.(tea.KeyMsg); ok && km.String() == "/" {
+		cmd := m.startFilter()
+		return m, cmd
+	}
+
 	before := m.List.Index()
 	var cmd tea.Cmd
 	m.List, cmd = m.List.Update(msg)
@@ -226,5 +372,8 @@ func nextSelectable(items []list.Item, from, dir int) (int, bool) {
 }
 
 func (m Model) View() string {
-	return m.List.View()
+	if !m.filterBarVisible() {
+		return m.List.View()
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, filterBarStyle.Render(m.filterInput.View()), m.List.View())
 }

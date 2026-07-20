@@ -117,6 +117,71 @@ func TestSpinnerTickAdvancesSharedFrame(t *testing.T) {
 	}
 }
 
+func TestSlashOpensFilterAndNarrowsByTitleOrDisplayID(t *testing.T) {
+	m := New([]domain.Task{
+		{ID: "1", DisplayID: "ACME-1", Title: "Fix login bug", Status: domain.StatusTodo},
+		{ID: "2", DisplayID: "ACME-2", Title: "Write docs", Status: domain.StatusTodo},
+	})
+	m.SetSize(40, 10)
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	if !m.Filtering() {
+		t.Fatal("expected Filtering() to be true after pressing /")
+	}
+
+	for _, r := range "login" {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	task, ok := m.Selected()
+	if !ok {
+		t.Fatal("expected a selected task after filtering by title")
+	}
+	if task.ID != "1" {
+		t.Fatalf("selected task = %q, want %q", task.ID, "1")
+	}
+
+	// Clear and search by display ID instead.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.Filtering() || m.HasActiveFilter() {
+		t.Fatal("expected esc to clear the filter entirely")
+	}
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	for _, r := range "acme-2" {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.Filtering() {
+		t.Fatal("expected enter to exit typing mode")
+	}
+	if !m.HasActiveFilter() {
+		t.Fatal("expected enter to keep the query applied")
+	}
+
+	task, ok = m.Selected()
+	if !ok {
+		t.Fatal("expected a selected task after filtering by display ID")
+	}
+	if task.ID != "2" {
+		t.Fatalf("selected task = %q, want %q", task.ID, "2")
+	}
+}
+
+func TestFilterWithNoMatchesLeavesListEmpty(t *testing.T) {
+	m := New([]domain.Task{{ID: "1", Title: "Fix login bug", Status: domain.StatusTodo}})
+	m.SetSize(40, 10)
+
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	for _, r := range "nonexistent" {
+		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	if _, ok := m.Selected(); ok {
+		t.Fatal("expected no selected task when the filter matches nothing")
+	}
+}
+
 func TestUpdateSkipsHeaderRowOnCursorDown(t *testing.T) {
 	m := New([]domain.Task{
 		{ID: "planned", Status: domain.StatusPlanned},

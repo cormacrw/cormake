@@ -344,6 +344,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateConfirmModal(msg)
 		}
 
+		// While the "/" filter box is focused, every keystroke belongs to
+		// it — letters like "e" or "p" must narrow the filter, not trigger
+		// Execute/Plan — so route straight to the tasklist rather than
+		// falling into the shortcut switch below.
+		if m.tasklist.Filtering() {
+			var cmd tea.Cmd
+			m.tasklist, cmd = m.tasklist.Update(msg)
+			m.syncDetail()
+			return m, cmd
+		}
+
 		if m.leftFocus == leftFocusDashboard {
 			return m.updateDashboardFocus(msg)
 		}
@@ -1719,10 +1730,12 @@ func (m *Model) syncDetail() {
 	t, ok := m.tasklist.Selected()
 	if !ok {
 		msg := "No tasks yet.\n\nPress n to create one."
-		switch m.activeTab {
-		case taskTabArchived:
+		switch {
+		case m.tasklist.HasActiveFilter():
+			msg = fmt.Sprintf("No tasks match %q.", m.tasklist.FilterQuery())
+		case m.activeTab == taskTabArchived:
 			msg = "No archived tasks."
-		case taskTabCompleted:
+		case m.activeTab == taskTabCompleted:
 			msg = "No completed tasks."
 		}
 		m.detail.SetEmpty(msg)
