@@ -1510,6 +1510,8 @@ func (m *Model) handleAgentEvent(ev agent.Event) {
 		if path, ok := extractPlanFilePath(ev.ToolName, ev.ToolInput); ok {
 			m.setPlanFilePath(ev.TaskID, path)
 		}
+	case agent.EventInit:
+		m.updateTaskSessionID(ev.TaskID, ev.SessionID)
 	case agent.EventResult:
 		m.resultSeen[ev.TaskID] = true
 		m.sessionCostUSD += ev.CostUSD
@@ -1529,6 +1531,7 @@ func (m *Model) handleAgentEvent(ev agent.Event) {
 				break
 			}
 		}
+		m.updateTaskSessionID(ev.TaskID, ev.SessionID)
 	}
 
 	// Persist how far into the raw stdout file this task has been
@@ -1572,6 +1575,23 @@ func claudePlansDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".claude", "plans") + string(filepath.Separator), nil
+}
+
+// updateTaskSessionID persists the agent-reported session ID onto the task
+// when it differs from what's stored — Cursor generates its own session on
+// fresh runs (cormake's pre-assigned UUID is ignored), so the init/result
+// events are what make --resume work on later feedback/input/review runs.
+func (m *Model) updateTaskSessionID(taskID, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	for i := range m.tasks {
+		if m.tasks[i].ID == taskID && m.tasks[i].SessionID != sessionID {
+			m.tasks[i].SessionID = sessionID
+			m.persistTask(m.tasks[i])
+			break
+		}
+	}
 }
 
 // setPlanFilePath records where a task's plan landed (see

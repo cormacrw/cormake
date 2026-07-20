@@ -2,8 +2,10 @@ package ui
 
 import (
 	"testing"
+	"time"
 
 	"cormake/internal/domain"
+	"cormake/internal/store"
 )
 
 func TestWorktreeName(t *testing.T) {
@@ -20,4 +22,52 @@ func TestWorktreeName(t *testing.T) {
 			t.Errorf("worktreeName() = %q, want %q", got, want)
 		}
 	})
+}
+
+func TestHandleAgentEventPersistsSessionID(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	const (
+		taskID   = "task-123"
+		staleID  = "cormake-preassigned-uuid"
+		cursorID = "cursor-agent-session-id"
+	)
+
+	now := time.Now()
+	task := domain.Task{
+		ID:        taskID,
+		SessionID: staleID,
+		Status:    domain.StatusPlanning,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := st.SaveTask(task); err != nil {
+		t.Fatalf("SaveTask: %v", err)
+	}
+
+	m := Model{
+		store: st,
+		tasks: []domain.Task{task},
+	}
+
+	m.updateTaskSessionID(taskID, cursorID)
+
+	if got, want := m.tasks[0].SessionID, cursorID; got != want {
+		t.Errorf("in-memory SessionID = %q, want %q", got, want)
+	}
+
+	loaded, err := st.LoadTasks()
+	if err != nil {
+		t.Fatalf("LoadTasks: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("LoadTasks len = %d, want 1", len(loaded))
+	}
+	if got, want := loaded[0].SessionID, cursorID; got != want {
+		t.Errorf("persisted SessionID = %q, want %q", got, want)
+	}
 }
