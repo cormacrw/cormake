@@ -135,6 +135,12 @@ type Task struct {
 
 	ResultSummary string
 
+	// CommitDescription is short bullet points parsed from the agent's final
+	// ```cormake-commit fenced block (see ui.parseAgentResult) — used as the
+	// git commit body for each execution attempt rather than the full
+	// ResultSummary prose.
+	CommitDescription string
+
 	// Cost and the token counts below accumulate across every agent run
 	// this task has had — planning, execution, and any resumed
 	// review-feedback round trips (see ui.handleAgentEvent) — rather than

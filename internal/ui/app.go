@@ -1454,15 +1454,21 @@ func buildPrompt(t domain.Task) string {
 }
 
 // executeSummaryInstruction asks claude to end a Complete-mode run on a
-// proper summary of the actual work done. It matters because the run's
-// final message becomes ev.ResultText -> Task.ResultSummary (see
+// proper summary of the actual work done plus a fenced commit-description
+// block. The prose becomes ev.ResultText -> Task.ResultSummary (see
 // handleAgentEvent's EventResult case) — cormake's Summary tab and the
 // description shown alongside a code review (see openRevdiffDiffCmd)
-// display that text verbatim, so without this it could just as easily end
-// on a trailing question or a bare "done".
+// display that text — while the fenced block is parsed into
+// Task.CommitDescription for slim git commit bodies (see
+// commitBodyFromTask).
 const executeSummaryInstruction = "\n\nWhen you are finished, your final message must be a concise summary " +
 	"of what you actually implemented (not a question, not a list of possible next steps) — it's stored " +
-	"and shown to the user as this task's result summary."
+	"and shown to the user as this task's result summary.\n\n" +
+	"End your message with a commit description block in this exact format (short bullet points only):\n\n" +
+	"```cormake-commit\n" +
+	"- first change\n" +
+	"- second change\n" +
+	"```"
 
 // buildExecutePrompt turns a task's title/description (and its plan, if it
 // has one) into the prompt sent to claude for a real Complete-mode run.
@@ -1518,7 +1524,9 @@ func (m *Model) handleAgentEvent(ev agent.Event) {
 		m.sessionCostUSD += ev.CostUSD
 		for i := range m.tasks {
 			if m.tasks[i].ID == ev.TaskID {
-				m.tasks[i].ResultSummary = ev.ResultText
+				summary, commitDesc := parseAgentResult(ev.ResultText)
+				m.tasks[i].ResultSummary = summary
+				m.tasks[i].CommitDescription = commitDesc
 				// Accumulate rather than overwrite: a task can go through
 				// several runs (plan, execute, resumed review-feedback
 				// rounds), each reporting its own EventResult, and the
@@ -1632,12 +1640,13 @@ func (m *Model) setPlanFilePath(taskID, path string) {
 // squashed until the eventual completeTaskCmd commit, so a task's worktree
 // history is easy to step through attempt by attempt during review. Plan
 // runs are excluded even though they now have a worktree too (see
-// resolveTaskWorktree) — plan-mode never writes into it. The commit body is
-// ResultSummary, the claude-authored description of what that particular
-// attempt actually changed (see executeSummaryInstruction and
-// handleAgentEvent's EventResult case) — freshly overwritten by this run's
-// own EventResult before taskFinishedMsg ever arrives here, so it describes
-// this attempt specifically rather than some earlier one.
+	// resolveTaskWorktree) — plan-mode never writes into it. The commit body is
+	// CommitDescription when the agent supplied a ```cormake-commit block,
+	// otherwise ResultSummary (see executeSummaryInstruction,
+	// parseAgentResult, and handleAgentEvent's EventResult case) — freshly
+	// overwritten by this run's own EventResult before taskFinishedMsg ever
+	// arrives here, so it describes this attempt specifically rather than
+	// some earlier one.
 func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 	delete(m.active, msg.TaskID)
 	sawResult := m.resultSeen[msg.TaskID]
@@ -1672,8 +1681,8 @@ func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 		if !wasPlanning && m.tasks[i].WorktreePath != "" {
 			m.tasks[i].ExecutionAttempts++
 			commitMsg := fmt.Sprintf("cormake: %s (attempt %d)", m.tasks[i].Title, m.tasks[i].ExecutionAttempts)
-			if summary := strings.TrimSpace(m.tasks[i].ResultSummary); summary != "" {
-				commitMsg += "\n\n" + summary
+			if body := commitBodyFromTask(m.tasks[i].ResultSummary, m.tasks[i].CommitDescription); body != "" {
+				commitMsg += "\n\n" + body
 			}
 			if err := commitWorktreeChanges(m.tasks[i].WorktreePath, commitMsg); err != nil {
 				m.appendLogLine(m.tasks[i].ID, logformat.LogCormakeLine("failed to commit execution attempt: "+err.Error()))
