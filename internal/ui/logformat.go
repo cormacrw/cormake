@@ -29,6 +29,18 @@ func logCormakeStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(theme.Accent())
 }
 
+// agentBackendLabel returns the human-facing name for backend — "claude" or
+// "cursor" — used everywhere the UI needs to say which agent it's talking
+// to (log lines, the input modal, its textarea placeholder). Empty/
+// unrecognized values read as "claude", the same fallback convention as
+// Model.runnerFor/Workspace.EffectiveDefaultAgentBackend.
+func agentBackendLabel(backend domain.AgentBackend) string {
+	if backend == domain.AgentBackendCursor {
+		return "cursor"
+	}
+	return "claude"
+}
+
 // Long tool_result blobs (a full file's contents, a huge `ls -la`, ...)
 // would otherwise flood the log with more text than anyone reads; these cap
 // how much of one shows before it's cut off with a marker.
@@ -50,10 +62,7 @@ func formatAgentLogLine(ev agent.Event, backend domain.AgentBackend) string {
 		return logMetaStyle.Render("▸ session started — model " + ev.Text)
 
 	case agent.EventText:
-		label := "● claude"
-		if backend == domain.AgentBackendCursor {
-			label = "● cursor"
-		}
+		label := "● " + agentBackendLabel(backend)
 		style := logAssistantStyle
 		if ev.IsSubagent {
 			style, label = logSubagentStyle, "◦ subagent"

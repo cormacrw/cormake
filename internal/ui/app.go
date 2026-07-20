@@ -693,9 +693,11 @@ func (m *Model) openCompleteModal() {
 }
 
 // openInputModal stages a free-form message to send to the selected task's
-// claude session — only eligible for PLANNED or READY_FOR_REVIEW tasks, the
-// two "stopped and waiting on a person" states outside of Review's revdiff
-// annotation flow.
+// existing agent session — only eligible for PLANNED or READY_FOR_REVIEW
+// tasks, the two "stopped and waiting on a person" states outside of
+// Review's revdiff annotation flow. The textarea's placeholder is
+// re-labeled per task (t.AgentBackend), since a message sent here resumes
+// whichever backend actually ran this task, not necessarily claude.
 func (m *Model) openInputModal() tea.Cmd {
 	t, ok := m.tasklist.Selected()
 	if !ok || (t.Status != domain.StatusPlanned && t.Status != domain.StatusReadyForReview) {
@@ -703,6 +705,7 @@ func (m *Model) openInputModal() tea.Cmd {
 	}
 	m.inputTaskID = t.ID
 	m.inputTextarea.Reset()
+	m.inputTextarea.Placeholder = "Type a message to send to " + agentBackendLabel(t.AgentBackend) + "..."
 	m.inputModalOpen = true
 	return m.inputTextarea.Focus()
 }
@@ -742,7 +745,7 @@ func (m *Model) sendInputPrompt(message string) tea.Cmd {
 		if t.ID != m.inputTaskID {
 			continue
 		}
-		m.appendLogLine(t.ID, logCormakeLine("sending message to claude"))
+		m.appendLogLine(t.ID, logCormakeLine("sending message to "+agentBackendLabel(t.AgentBackend)))
 		if t.Status == domain.StatusReadyForReview {
 			return m.runExecuteAgent(t, message+executeSummaryInstruction, t.SessionID)
 		}
@@ -1390,7 +1393,7 @@ func (m *Model) handleRevdiffFinished(msg revdiffFinishedMsg) tea.Cmd {
 		if t.ID != msg.taskID {
 			continue
 		}
-		m.appendLogLine(t.ID, logCormakeLine("sending review feedback to claude for revision"))
+		m.appendLogLine(t.ID, logCormakeLine("sending review feedback to "+agentBackendLabel(t.AgentBackend)+" for revision"))
 		if msg.kind == reviewKindExecute {
 			return m.runExecuteAgent(t, buildExecuteRevisePrompt(msg.annotations), t.SessionID)
 		}
@@ -2013,7 +2016,7 @@ func swatchColor(c string) string {
 // full screen.
 func (m Model) renderInputModal() string {
 	lines := []string{
-		"Send a message to claude", "",
+		"Send a message to " + agentBackendLabel(m.taskAgentBackend(m.inputTaskID)), "",
 		m.inputTextarea.View(), "",
 		tabInfoStyle.Render("[ctrl+s] send   [esc] cancel"),
 	}
