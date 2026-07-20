@@ -332,6 +332,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleCompleteFinished(msg)
 		return m, nil
 
+	case deleteFinishedMsg:
+		m.handleDeleteFinished(msg)
+		return m, nil
+
 	case agentEventMsg:
 		m.handleAgentEvent(msg.Event)
 		return m, waitForEvent(m.eventsCh)
@@ -672,7 +676,7 @@ func (m *Model) openDeleteConfirm() {
 		return
 	}
 	m.confirmModalOpen = true
-	m.confirmMessage = fmt.Sprintf("Delete %q? This cannot be undone.", t.Title)
+	m.confirmMessage = fmt.Sprintf("Delete %q? This removes the task and any associated worktree/branch. This cannot be undone.", t.Title)
 	m.confirmKind = confirmKindDelete
 	m.confirmTaskID = t.ID
 }
@@ -788,6 +792,56 @@ func (m *Model) startCompleteTask() tea.Cmd {
 	return completeTaskCmd(target.ID, repoPath, target.WorktreePath, branch, "cormake: "+target.Title)
 }
 
+// startDeleteTask kills any live agent for the staged task, then runs async
+// git cleanup (worktree removal and branch deletion) before the task record
+// is removed. When the task has no repo assigned, it skips git cleanup and
+// finishes immediately.
+func (m *Model) startDeleteTask() tea.Cmd {
+	var target domain.Task
+	found := false
+	for _, t := range m.tasks {
+		if t.ID == m.confirmTaskID {
+			target = t
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil
+	}
+	if h, ok := m.active[target.ID]; ok {
+		h.Kill()
+		delete(m.active, target.ID)
+	}
+	repoPath, ok := m.repoPath(target.RepoID)
+	if !ok || repoPath == "" || target.RepoID == "" {
+		return func() tea.Msg {
+			return deleteFinishedMsg{taskID: target.ID}
+		}
+	}
+	return deleteTaskCmd(target, repoPath, m.tasks)
+}
+
+// handleDeleteFinished removes the task from memory and disk after git
+// cleanup finishes. Git failures are logged but do not block deletion.
+func (m *Model) handleDeleteFinished(msg deleteFinishedMsg) {
+	if msg.err != nil {
+		label := msg.taskID
+		for _, t := range m.tasks {
+			if t.ID == msg.taskID {
+				if t.DisplayID != "" {
+					label = t.DisplayID
+				} else {
+					label = t.Title
+				}
+				break
+			}
+		}
+		fmt.Fprintln(os.Stderr, "cormake: failed to clean up git for task", label+":", msg.err)
+	}
+	m.deleteTask(msg.taskID)
+}
+
 // handleCompleteFinished reacts to a finalize sequence ending: success moves
 // the task to Complete and records the branch it landed on, clearing
 // WorktreePath since that directory no longer exists (also keeps Review
@@ -821,8 +875,8 @@ func (m Model) updateConfirmModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "y", "enter":
 		m.confirmModalOpen = false
 		if m.confirmKind == confirmKindDelete {
-			m.deleteTask(m.confirmTaskID)
-			return m, nil
+			cmd := m.startDeleteTask()
+			return m, cmd
 		}
 		if m.confirmKind == confirmKindComplete {
 			cmd := m.startCompleteTask()

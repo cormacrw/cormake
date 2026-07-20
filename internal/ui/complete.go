@@ -35,12 +35,8 @@ func completeTaskCmd(taskID, repoPath, worktreePath, branch, commitMessage strin
 		if err := commitWorktreeChanges(worktreePath, commitMessage); err != nil {
 			return completeFinishedMsg{taskID: taskID, err: fmt.Errorf("commit: %w", err)}
 		}
-		// Best-effort: a worktree that was never locked (or got unlocked
-		// some other way) errors here too, and remove below still works —
-		// only remove's own failure is worth surfacing.
-		_, _ = runGit(repoPath, "worktree", "unlock", worktreePath)
-		if out, err := runGit(repoPath, "worktree", "remove", worktreePath); err != nil {
-			return completeFinishedMsg{taskID: taskID, branch: branch, err: fmt.Errorf("remove worktree: %w: %s", err, out)}
+		if err := removeWorktree(repoPath, worktreePath, false); err != nil {
+			return completeFinishedMsg{taskID: taskID, branch: branch, err: err}
 		}
 		return completeFinishedMsg{taskID: taskID, branch: branch}
 	}
