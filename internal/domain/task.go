@@ -125,12 +125,11 @@ type Task struct {
 	// EffectiveDefaultTargetBranch, overridable in the new-task wizard.
 	SourceBranch string
 
-	// PlanFilePath points at the plan claude wrote during a plan-mode run.
-	// claude's plan-mode has a built-in, hardcoded allowance to write to
-	// ~/.claude/plans/ (confirmed directly — it ignores any other path
-	// instructed and lands there instead) while everything else stays
-	// genuinely read-only; cormake just watches for that Write/Edit and
-	// remembers where it landed, rather than owning the file itself.
+	// PlanFilePath points at the plan an agent wrote during a plan-mode run.
+	// Claude plan-mode writes to ~/.claude/plans/ (confirmed directly); cursor
+	// plan-mode uses createPlanToolCall with inline markdown, which cormake
+	// persists under store.PlanPath. cormake watches tool calls and remembers
+	// where the plan landed rather than owning the file itself.
 	PlanFilePath string
 
 	ResultSummary string

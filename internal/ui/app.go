@@ -5,7 +5,6 @@ package ui
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1514,9 +1513,7 @@ func (m *Model) handleAgentEvent(ev agent.Event) {
 
 	switch ev.Type {
 	case agent.EventToolUse:
-		if path, ok := extractPlanFilePath(ev.ToolName, ev.ToolInput); ok {
-			m.setPlanFilePath(ev.TaskID, path)
-		}
+		m.handlePlanToolUse(ev.TaskID, ev.ToolName, ev.ToolInput)
 	case agent.EventInit:
 		m.updateTaskSessionID(ev.TaskID, ev.SessionID)
 	case agent.EventResult:
@@ -1554,38 +1551,6 @@ func (m *Model) handleAgentEvent(ev agent.Event) {
 	}
 }
 
-// extractPlanFilePath checks whether a Write/Edit tool call targeted
-// claude's plan directory (~/.claude/plans/ — its own hardcoded, always
-// read-only-mode-permitted scratch space for plan-mode, confirmed
-// directly, not assumed). toolInputJSON is the tool's JSON-stringified
-// input; only its file_path field is used.
-func extractPlanFilePath(toolName, toolInputJSON string) (string, bool) {
-	if toolName != "Write" && toolName != "Edit" {
-		return "", false
-	}
-	var input struct {
-		FilePath string `json:"file_path"`
-	}
-	if err := json.Unmarshal([]byte(toolInputJSON), &input); err != nil || input.FilePath == "" {
-		return "", false
-	}
-	plansDir, err := claudePlansDir()
-	if err != nil || !strings.HasPrefix(input.FilePath, plansDir) {
-		return "", false
-	}
-	return input.FilePath, true
-}
-
-// claudePlansDir returns ~/.claude/plans/ (trailing separator, so it's
-// ready for a strings.HasPrefix path check).
-func claudePlansDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".claude", "plans") + string(filepath.Separator), nil
-}
-
 // updateTaskSessionID persists the agent-reported session ID onto the task
 // when it differs from what's stored — Cursor generates its own session on
 // fresh runs (cormake's pre-assigned UUID is ignored), so the init/result
@@ -1603,8 +1568,7 @@ func (m *Model) updateTaskSessionID(taskID, sessionID string) {
 	}
 }
 
-// setPlanFilePath records where a task's plan landed (see
-// extractPlanFilePath) and refreshes the detail pane immediately, so the
+// setPlanFilePath records where a task's plan landed (see planfile.go) and
 // Plan tab can appear mid-run rather than only once the whole run finishes.
 func (m *Model) setPlanFilePath(taskID, path string) {
 	for i := range m.tasks {

@@ -269,6 +269,27 @@ func describeToolUse(name, inputJSON string) string {
 		if cmd, ok := str("command"); ok {
 			return "$ " + oneLine(cmd)
 		}
+	case "createPlanToolCall":
+		if planName, ok := str("name"); ok {
+			return "Plan: " + planName
+		}
+		return "Plan"
+	case "writeToolCall", "editToolCall":
+		if fp, ok := str("path"); ok {
+			return strings.TrimSuffix(name, "ToolCall") + " " + fp
+		}
+	case "readToolCall":
+		if fp, ok := str("path"); ok {
+			return "Read " + fp
+		}
+	case "shellToolCall":
+		if cmd, ok := str("command"); ok {
+			return "$ " + oneLine(cmd)
+		}
+	case "globToolCall":
+		if pattern, ok := str("globPattern"); ok {
+			return "Glob " + pattern
+		}
 	case "Read", "Write", "Edit", "NotebookEdit":
 		if fp, ok := str("file_path"); ok {
 			return name + " " + fp

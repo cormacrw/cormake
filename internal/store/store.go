@@ -28,6 +28,9 @@ func Open(dir string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o755); err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(filepath.Join(dir, "plans"), 0o755); err != nil {
+		return nil, err
+	}
 	return &Store{dir: dir}, nil
 }
 
@@ -152,5 +155,6 @@ func (s *Store) DeleteTask(id string) error {
 	_ = os.Remove(s.RawStdoutPath(id))
 	_ = os.Remove(s.RawStderrPath(id))
 	_ = os.Remove(s.offsetPath(id))
+	_ = os.Remove(s.PlanPath(id))
 	return nil
 }
