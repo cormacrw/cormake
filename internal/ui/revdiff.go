@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"cormake/internal/domain"
 )
 
 // reviewKind distinguishes what a revdiff session was reviewing, so
@@ -157,17 +159,24 @@ func openRevdiffDiffCmd(taskID, worktreePath, baseRef, resultSummary string) tea
 // buildRevisePrompt turns raw revdiff annotation output (format: "##
 // <label>:<line>" followed by the note on the next line, one block per
 // annotation) into a follow-up prompt asking the agent to revise its plan.
-// planFilePath, when set, tells the agent where cormake reads the plan from
-// so a revision must rewrite that file (or call createPlanToolCall with the
-// full revised text) — not just claim success in prose.
-func buildRevisePrompt(annotations, planFilePath string) string {
+// Backend-specific delivery instructions matter: cursor plan-mode is
+// read-only on disk and must use createPlanToolCall (cormake persists that
+// inline markdown itself), whereas claude plan-mode can Write/Edit its plan
+// scratch file directly.
+func buildRevisePrompt(annotations string, backend domain.AgentBackend, planFilePath string) string {
 	out := "Here is feedback on the plan you just proposed, as inline review annotations " +
 		"(each is a \"## <label>:<line>\" heading followed by the note):\n\n" +
 		annotations +
 		"\n\nPlease revise the plan to address this feedback."
-	if planFilePath != "" {
-		out += "\n\nThe current plan file is at " + planFilePath +
-			" — overwrite it with the complete revised plan. Do not reply that the plan is updated unless you have actually written the new plan content."
+	switch backend {
+	case domain.AgentBackendCursor:
+		out += "\n\nDeliver the complete revised plan by calling createPlanToolCall with the full updated markdown. " +
+			"Do not try to write or edit files on disk — plan mode cannot modify files outside the worktree, and cormake reads the plan from createPlanToolCall, not from a file you write."
+	default:
+		if planFilePath != "" {
+			out += "\n\nThe current plan file is at " + planFilePath +
+				" — update it with the complete revised plan (Write/Edit). Do not reply that the plan is updated unless you have actually written the new plan content."
+		}
 	}
 	return out
 }

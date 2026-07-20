@@ -1397,7 +1397,7 @@ func (m *Model) handleRevdiffFinished(msg revdiffFinishedMsg) tea.Cmd {
 		if msg.kind == reviewKindExecute {
 			return m.runExecuteAgent(t, buildExecuteRevisePrompt(msg.annotations), t.SessionID)
 		}
-		return m.runPlanAgent(t, buildRevisePrompt(msg.annotations, t.PlanFilePath), t.SessionID)
+		return m.runPlanAgent(t, buildRevisePrompt(msg.annotations, t.AgentBackend, t.PlanFilePath), t.SessionID)
 	}
 	return nil
 }
