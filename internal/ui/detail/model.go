@@ -200,12 +200,12 @@ func (m *Model) syncViewportContent() {
 // every render keeps width honest for the terminal size in front of the
 // user now, and applying style after wrap keeps continuation lines colored.
 func (m Model) renderLog(taskID string) string {
-	lines := m.logs[taskID]
-	if len(lines) == 0 {
+	entries := logformat.ExpandLogLines(m.logs[taskID])
+	if len(entries) == 0 {
 		return ""
 	}
-	wrapped := make([]string, len(lines))
-	for i, line := range lines {
+	wrapped := make([]string, len(entries))
+	for i, line := range entries {
 		wrapped[i] = logformat.RenderLogLine(line, m.width)
 	}
 	return strings.Join(wrapped, "\n")

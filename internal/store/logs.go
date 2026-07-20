@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"cormake/internal/logformat"
 )
 
 func (s *Store) logPath(taskID string) string {
@@ -24,15 +26,13 @@ func (s *Store) AppendLogLine(taskID, line string) error {
 		return err
 	}
 	defer f.Close()
-	_, err = f.WriteString(line + "\n")
+	_, err = f.WriteString(line + logformat.LogRecordSep)
 	return err
 }
 
 // LoadLog reads a task's persisted log back, or (nil, nil) if it has none
-// yet. Returned as a single-element slice rather than split back into
-// per-event lines — detail.Model always renders its log via
-// strings.Join(lines, "\n"), so the joined output is identical either way
-// and there's no need to reconstruct the original entry boundaries.
+// yet. Returns one slice element per appended log entry so the UI can style
+// each entry independently at render time.
 func (s *Store) LoadLog(taskID string) ([]string, error) {
 	data, err := os.ReadFile(s.logPath(taskID))
 	if errors.Is(err, os.ErrNotExist) {
@@ -41,9 +41,9 @@ func (s *Store) LoadLog(taskID string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	text := strings.TrimRight(string(data), "\n")
+	text := strings.TrimRight(string(data), "\n"+logformat.LogRecordSep)
 	if text == "" {
 		return nil, nil
 	}
-	return []string{text}, nil
+	return logformat.ParsePersistedLog(text), nil
 }

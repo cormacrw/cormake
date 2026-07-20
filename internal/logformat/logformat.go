@@ -98,6 +98,110 @@ func LogCormakeLine(msg string) string {
 	return "cormake: " + msg
 }
 
+// LogRecordSep delimits persisted log entries. Each AppendLogLine write ends
+// with this byte so LoadLog can split entries even when an entry itself
+// contains embedded newlines (multi-line tool results).
+const LogRecordSep = "\x1e"
+
+// ParsePersistedLog splits one persisted log blob into individual entries.
+// New-format files use LogRecordSep; older files used bare newlines between
+// entries and are split heuristically from their visible text. Legacy entries
+// that were saved with inline ANSI codes are stripped before splitting.
+func ParsePersistedLog(text string) []string {
+	if text == "" {
+		return nil
+	}
+	if strings.Contains(text, LogRecordSep) {
+		return filterEmpty(strings.Split(text, LogRecordSep))
+	}
+	plain := text
+	if strings.Contains(text, "\x1b") || strings.Contains(text, "\x9b") {
+		plain = ansi.Strip(text)
+	}
+	return splitLogEntries(plain)
+}
+
+// ExpandLogLines flattens a task's in-memory log slice into one element per
+// logical entry. Slice elements loaded before entry splitting was added may
+// still be whole-file blobs; live appends are already one entry each.
+func ExpandLogLines(lines []string) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, ParsePersistedLog(line)...)
+	}
+	return out
+}
+
+func splitLogEntries(text string) []string {
+	if text == "" {
+		return nil
+	}
+	if !strings.Contains(text, "\n") {
+		return []string{text}
+	}
+
+	lines := strings.Split(text, "\n")
+	entries := make([]string, 0, len(lines))
+	var cur strings.Builder
+
+	flush := func() {
+		if cur.Len() == 0 {
+			return
+		}
+		entries = append(entries, cur.String())
+		cur.Reset()
+	}
+
+	for _, line := range lines {
+		if line == "" {
+			if cur.Len() > 0 {
+				flush()
+			}
+			continue
+		}
+		if cur.Len() == 0 {
+			cur.WriteString(line)
+			continue
+		}
+		if isNewLogEntryLine(line, cur.String()) {
+			flush()
+			cur.WriteString(line)
+			continue
+		}
+		cur.WriteByte('\n')
+		cur.WriteString(line)
+	}
+	flush()
+	return entries
+}
+
+func isNewLogEntryLine(line, current string) bool {
+	if strings.HasPrefix(line, "    ") {
+		return !strings.HasPrefix(strings.TrimLeft(current, "\n"), "    ")
+	}
+	return strings.HasPrefix(line, "cormake: ") ||
+		strings.HasPrefix(line, "▸ session started") ||
+		strings.HasPrefix(line, "  ⚙ ") ||
+		strings.HasPrefix(line, "  ⚠ ") ||
+		strings.HasPrefix(line, "✖ ") ||
+		strings.HasPrefix(line, "✔ ") ||
+		strings.HasPrefix(line, "● ") ||
+		strings.HasPrefix(line, "◦ subagent")
+}
+
+func filterEmpty(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
 // RenderLogLine styles and optionally word-wraps one stored log entry for
 // display. Lines are stored as plain text; older persisted logs that still
 // contain ANSI codes are stripped and re-styled from their visible prefix.
