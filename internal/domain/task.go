@@ -63,6 +63,16 @@ type Task struct {
 	SessionID    string
 	WorktreeName string
 
+	// AgentBackend is which agent CLI (see AgentBackend) this task's active
+	// session actually belongs to — set once when a fresh Plan or Execute
+	// run is kicked off from the confirmation modal, then reused by every
+	// later resume of that same task (revise-after-review, a free-form
+	// message). Zero-value (empty) on already-persisted tasks is treated as
+	// AgentBackendClaude, matching this codebase's existing
+	// zero-value-means-legacy-default convention (see e.g.
+	// Workspace.EffectiveMaxConcurrentAgents).
+	AgentBackend AgentBackend
+
 	// PID is the OS process ID of this task's live (or most-recently-run)
 	// claude process, if any — used to detect whether a task left
 	// Planning/InProgress by a previous cormake process actually survived a

@@ -22,6 +22,7 @@ import (
 
 	"cormake/internal/agent"
 	"cormake/internal/agent/claude"
+	"cormake/internal/agent/cursor"
 	"cormake/internal/domain"
 	"cormake/internal/store"
 	"cormake/internal/ui/detail"
@@ -82,6 +83,12 @@ type Model struct {
 	confirmTo        domain.Status
 	confirmFrom      []domain.Status
 	confirmTaskID    string
+	// confirmBackend is the agent backend a pending Plan/Execute
+	// confirmation (confirmKindTransition only) will use — initialized in
+	// openConfirm from the task's workspace default, toggleable in the
+	// modal itself before confirming (see renderConfirmModal/
+	// updateConfirmModal).
+	confirmBackend domain.AgentBackend
 
 	repoNames map[string]string
 
@@ -107,15 +114,17 @@ type Model struct {
 	// since it shells out to git per worktree.
 	dashboardWorktrees []worktreeRow
 
-	// runner is the agent backend — claude.Client today, but kept behind
-	// the agent.Runner interface so nothing here is claude-specific.
+	// runners maps each domain.AgentBackend to the agent.Runner that
+	// actually implements it — see runnerFor, which every call site goes
+	// through instead of touching this map directly, so unrecognized/empty
+	// backend values still fall back to claude rather than panicking.
 	// eventsCh is the shared fan-in channel every running task's forwarding
 	// goroutine writes to; active tracks running handles by task ID. A
 	// running task's process is never killed just because cormake quits —
 	// see the removal of the old cancelAllActive — so active is purely
 	// bookkeeping for forwardEvents/deleteTask; no manual per-task Cancel
 	// key wired up yet, that's still a future piece.
-	runner   agent.Runner
+	runners  map[domain.AgentBackend]agent.Runner
 	eventsCh chan tea.Msg
 	active   map[string]*agent.Handle
 
@@ -211,13 +220,40 @@ func New(st *store.Store) (Model, error) {
 		tasklist:      tasklist.New(nil),
 		detail:        detail.New(logs),
 		inputTextarea: ta,
-		runner:        claude.Client{},
-		eventsCh:      make(chan tea.Msg, 64),
-		active:        make(map[string]*agent.Handle),
-		resultSeen:    make(map[string]bool),
+		runners: map[domain.AgentBackend]agent.Runner{
+			domain.AgentBackendClaude: claude.Client{},
+			domain.AgentBackendCursor: cursor.Client{},
+		},
+		eventsCh:   make(chan tea.Msg, 64),
+		active:     make(map[string]*agent.Handle),
+		resultSeen: make(map[string]bool),
 	}
 	m.refreshTaskList()
 	return m, nil
+}
+
+// runnerFor resolves backend to the agent.Runner that implements it,
+// falling back to claude for an empty or unrecognized value — this is what
+// lets an empty Task.AgentBackend (every task persisted before this field
+// existed) keep behaving exactly as before, with no migration needed.
+func (m Model) runnerFor(backend domain.AgentBackend) agent.Runner {
+	if r, ok := m.runners[backend]; ok {
+		return r
+	}
+	return m.runners[domain.AgentBackendClaude]
+}
+
+// replayFileFor resolves backend to the ReplayFile func that knows how to
+// parse that backend's own stream-json dialect (see reconnectTask) — unlike
+// ProcessAlive (a dialect-free PID check, so claude.ProcessAlive is reused
+// directly regardless of backend), replaying raw stdout has to go through
+// the same dialect parser the run was originally produced by. Falls back to
+// claude for an empty/unrecognized value, same convention as runnerFor.
+func replayFileFor(backend domain.AgentBackend) func(taskID, path string, fromOffset int64) ([]agent.Event, int64) {
+	if backend == domain.AgentBackendCursor {
+		return cursor.ReplayFile
+	}
+	return claude.ReplayFile
 }
 
 // Init kicks off listening for agent events plus, for every task loaded
@@ -600,6 +636,7 @@ func (m *Model) openConfirm(verb string, to domain.Status, allowedFrom ...domain
 	m.confirmKind = confirmKindTransition
 	m.confirmTo = to
 	m.confirmFrom = allowedFrom
+	m.confirmBackend = m.workspaces[m.activeWS].EffectiveDefaultAgentBackend()
 }
 
 // openWorkspacePicker opens the workspace-picker modal, resetting its cursor
@@ -784,10 +821,32 @@ func (m Model) updateConfirmModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.advanceSelected(m.confirmTo, m.confirmFrom...)
 		return m, nil
+	case "left", "right", "tab":
+		// Only the two status-transition confirms (Plan/Execute) show the
+		// backend selector — delete/complete confirms have no agent run to
+		// pick a backend for, so left/right/tab there falls through to the
+		// default cancel-on-anything-else behavior below, same as before
+		// this selector existed.
+		if m.confirmKind == confirmKindTransition {
+			m.confirmBackend = toggleAgentBackend(m.confirmBackend)
+			return m, nil
+		}
+		m.confirmModalOpen = false
+		return m, nil
 	default:
 		m.confirmModalOpen = false
 		return m, nil
 	}
+}
+
+// toggleAgentBackend flips between the two agent backends the confirmation
+// modal's selector cycles through (see updateConfirmModal/
+// renderConfirmModal).
+func toggleAgentBackend(b domain.AgentBackend) domain.AgentBackend {
+	if b == domain.AgentBackendCursor {
+		return domain.AgentBackendClaude
+	}
+	return domain.AgentBackendCursor
 }
 
 // createTask adds a new TODO task to the active workspace. repoID,
@@ -999,7 +1058,12 @@ func (m *Model) advanceSelected(to domain.Status, allowedFrom ...domain.Status) 
 	m.refreshTaskList()
 }
 
-// startPlanRun spawns a real claude plan-mode run for the selected task.
+// startPlanRun spawns a real plan-mode agent run for the selected task, on
+// whichever backend the confirmation modal's selector settled on
+// (m.confirmBackend) — a fresh Plan run always starts a brand new session
+// (resumeSessionID ""), so it's always free to pick its own backend. See
+// runPlanAgent's persistence of t.AgentBackend for how later resumes (e.g.
+// revise-after-review) end up reusing this same choice automatically.
 // Eligibility was already checked once in openConfirm before the
 // confirmation modal appeared; nothing else could change the task's status
 // in between (the modal blocks all other input), so this doesn't
@@ -1009,6 +1073,7 @@ func (m *Model) startPlanRun() tea.Cmd {
 	if !ok {
 		return nil
 	}
+	t.AgentBackend = m.confirmBackend
 	return m.runPlanAgent(t, buildPrompt(t), "")
 }
 
@@ -1127,7 +1192,7 @@ func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.
 		spec.SessionID = sessionID
 	}
 
-	handle, err := m.runner.Start(context.Background(), spec)
+	handle, err := m.runnerFor(t.AgentBackend).Start(context.Background(), spec)
 	if err != nil {
 		m.appendLogLine(t.ID, logCormakeLine("failed to start: "+err.Error()))
 		return nil
@@ -1149,6 +1214,7 @@ func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.
 			m.tasks[i].WorktreeBaseRef = baseRef
 			m.tasks[i].WorktreePath = worktreePath
 			m.tasks[i].PID = handle.PID
+			m.tasks[i].AgentBackend = t.AgentBackend
 			m.persistTask(m.tasks[i])
 			break
 		}
@@ -1161,14 +1227,19 @@ func (m *Model) runPlanAgent(t domain.Task, prompt, resumeSessionID string) tea.
 	return m.ensureSpinnerTicking()
 }
 
-// startExecuteRun spawns a fresh real claude Complete-mode run for the
-// selected task. Eligibility (TODO/PLANNED) was already checked once in
-// openConfirm before the confirmation modal appeared.
+// startExecuteRun spawns a fresh real Complete-mode agent run for the
+// selected task, on whichever backend the confirmation modal's selector
+// settled on (m.confirmBackend). Execute always starts a fresh session
+// regardless of what backend a prior Plan run used (resumeSessionID is
+// always "" here — see runExecuteAgent), so it's always free to pick its
+// own backend independent of Plan's. Eligibility (TODO/PLANNED) was already
+// checked once in openConfirm before the confirmation modal appeared.
 func (m *Model) startExecuteRun() tea.Cmd {
 	t, ok := m.tasklist.Selected()
 	if !ok {
 		return nil
 	}
+	t.AgentBackend = m.confirmBackend
 	return m.runExecuteAgent(t, buildExecutePrompt(t), "")
 }
 
@@ -1221,7 +1292,7 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 		spec.SessionID = sessionID
 	}
 
-	handle, err := m.runner.Start(context.Background(), spec)
+	handle, err := m.runnerFor(t.AgentBackend).Start(context.Background(), spec)
 	if err != nil {
 		m.appendLogLine(t.ID, logCormakeLine("failed to start: "+err.Error()))
 		return nil
@@ -1241,6 +1312,7 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 			m.tasks[i].WorktreeBaseRef = baseRef
 			m.tasks[i].WorktreePath = worktreePath
 			m.tasks[i].PID = handle.PID
+			m.tasks[i].AgentBackend = t.AgentBackend
 			m.persistTask(m.tasks[i])
 			break
 		}
@@ -1597,7 +1669,8 @@ var reconnectExecutePrompt = "cormake was restarted and is reconnecting to this 
 // in order:
 //
 //  1. The recorded PID is still alive → reattach a tailer to it (via
-//     m.runner.Attach) from the stored offset. No new process is spawned;
+//     m.runnerFor(t.AgentBackend).Attach) from the stored offset. No new
+//     process is spawned;
 //     this is the common case for "closed cormake, or switched to another
 //     tool, and it kept running".
 //  2. The PID is dead, but replaying the raw stdout file from the stored
@@ -1629,7 +1702,7 @@ func (m *Model) reconnectTask(taskID string) tea.Cmd {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "cormake: failed to load offset for", t.ID+":", err)
 		}
-		handle, err := m.runner.Attach(context.Background(), agent.AttachSpec{
+		handle, err := m.runnerFor(t.AgentBackend).Attach(context.Background(), agent.AttachSpec{
 			TaskID:        t.ID,
 			PID:           t.PID,
 			RawStdoutPath: m.store.RawStdoutPath(t.ID),
@@ -1649,7 +1722,7 @@ func (m *Model) reconnectTask(taskID string) tea.Cmd {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cormake: failed to load offset for", t.ID+":", err)
 	}
-	events, newOffset := claude.ReplayFile(t.ID, m.store.RawStdoutPath(t.ID), offset)
+	events, newOffset := replayFileFor(t.AgentBackend)(t.ID, m.store.RawStdoutPath(t.ID), offset)
 	for _, ev := range events {
 		m.handleAgentEvent(ev)
 	}
@@ -1936,14 +2009,32 @@ func (m Model) renderInputModal() string {
 }
 
 // renderConfirmModal draws the Plan/Execute confirmation prompt, centered
-// over the full screen.
+// over the full screen. The status-transition confirms (Plan/Execute) also
+// show a two-option agent-backend toggle beneath the message; delete/
+// complete confirms have no agent run to pick a backend for, so it's
+// omitted there.
 func (m Model) renderConfirmModal() string {
-	lines := []string{
-		m.confirmMessage, "",
-		tabInfoStyle.Render("[y]es   [n]o"),
+	lines := []string{m.confirmMessage}
+	if m.confirmKind == confirmKindTransition {
+		lines = append(lines, "", "Agent:  "+renderAgentBackendToggle(m.confirmBackend))
 	}
+	lines = append(lines, "", tabInfoStyle.Render("[y]es   [n]o   [tab] switch agent"))
 	box := focusedPaneBorderStyle().Padding(1, 3).Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// renderAgentBackendToggle draws the manual two-option backend picker used
+// by renderConfirmModal — a plain highlighted-label toggle rather than a
+// full huh.Select, matching this modal's existing plain-text style (it's
+// not a huh.Form today, unlike e.g. branchPicker).
+func renderAgentBackendToggle(selected domain.AgentBackend) string {
+	label := func(name string, backend domain.AgentBackend) string {
+		if selected == backend || (selected == "" && backend == domain.AgentBackendClaude) {
+			return activeTabStyle().Render("(*) " + name)
+		}
+		return tabInfoStyle.Render("( ) " + name)
+	}
+	return label("claude", domain.AgentBackendClaude) + "   " + label("cursor", domain.AgentBackendCursor)
 }
 
 // renderBody renders the three panes: the CORMAKE dashboard tile and the

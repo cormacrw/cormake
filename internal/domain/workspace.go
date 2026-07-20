@@ -50,9 +50,25 @@ type Workspace struct {
 	// EffectiveDefaultTargetBranch.
 	DefaultTargetBranch string
 
+	// DefaultAgentBackend is which agent CLI (see AgentBackend) Plan/Execute
+	// runs in this workspace use by default, overridable per-run from the
+	// confirmation modal. Hand-edited via workspaces.json, same as
+	// TaskTemplate/Prefix — empty means unset, see
+	// EffectiveDefaultAgentBackend.
+	DefaultAgentBackend AgentBackend
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
+
+// AgentBackend selects which coding-agent CLI a Plan/Execute run actually
+// shells out to (see agent.Runner) — claude and cursor-agent today.
+type AgentBackend string
+
+const (
+	AgentBackendClaude AgentBackend = "claude"
+	AgentBackendCursor AgentBackend = "cursor"
+)
 
 // DefaultMaxConcurrentAgents is the cap applied when MaxConcurrentAgents is
 // unset. Kept low by default since each running agent is a full claude
@@ -77,4 +93,15 @@ func (w Workspace) EffectiveDefaultTargetBranch() string {
 		return w.DefaultTargetBranch
 	}
 	return DefaultSourceBranch
+}
+
+// EffectiveDefaultAgentBackend returns the agent backend a fresh Plan/Execute
+// run in this workspace should default to: DefaultAgentBackend if set, else
+// AgentBackendClaude — so workspaces.json files written before this field
+// existed keep behaving exactly as before.
+func (w Workspace) EffectiveDefaultAgentBackend() AgentBackend {
+	if w.DefaultAgentBackend != "" {
+		return w.DefaultAgentBackend
+	}
+	return AgentBackendClaude
 }
