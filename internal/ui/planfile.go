@@ -12,13 +12,17 @@ import (
 // ~/.claude/plans/; cursor plan-mode runs createPlanToolCall with inline
 // markdown (planUri is empty headless — confirmed directly), which cormake
 // persists under store.PlanPath. Cursor file writes to ~/.cursor/plans/
-// are also recognized as a fallback.
+// or this task's existing PlanFilePath are also recognized.
 func (m *Model) handlePlanToolUse(taskID, toolName, toolInput string) {
 	if path, ok := extractClaudePlanFilePath(toolName, toolInput); ok {
 		m.setPlanFilePath(taskID, path)
 		return
 	}
 	if path, ok := extractCursorPlanFilePath(toolName, toolInput); ok {
+		m.setPlanFilePath(taskID, path)
+		return
+	}
+	if path, ok := extractKnownPlanFilePath(toolName, toolInput, m.taskPlanFilePath(taskID)); ok {
 		m.setPlanFilePath(taskID, path)
 		return
 	}
@@ -31,6 +35,15 @@ func (m *Model) handlePlanToolUse(taskID, toolName, toolInput string) {
 		return
 	}
 	m.setPlanFilePath(taskID, path)
+}
+
+func (m Model) taskPlanFilePath(taskID string) string {
+	for _, t := range m.tasks {
+		if t.ID == taskID {
+			return t.PlanFilePath
+		}
+	}
+	return ""
 }
 
 // extractClaudePlanFilePath checks whether a Write/Edit tool call targeted
@@ -88,6 +101,25 @@ func extractCursorPlanContent(toolName, toolInputJSON string) (string, bool) {
 		return "", false
 	}
 	return input.Plan, true
+}
+
+// extractKnownPlanFilePath checks whether a cursor write/edit tool call
+// targeted this task's already-recorded plan file — used when a revise run
+// edits ~/.cormake/plans/{taskID}.md in place instead of createPlanToolCall.
+func extractKnownPlanFilePath(toolName, toolInputJSON, knownPath string) (string, bool) {
+	if knownPath == "" {
+		return "", false
+	}
+	if toolName != "writeToolCall" && toolName != "editToolCall" {
+		return "", false
+	}
+	var input struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(toolInputJSON), &input); err != nil || input.Path != knownPath {
+		return "", false
+	}
+	return knownPath, true
 }
 
 func claudePlansDir() (string, error) {

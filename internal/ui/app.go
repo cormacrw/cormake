@@ -1569,17 +1569,19 @@ func (m *Model) updateTaskSessionID(taskID, sessionID string) {
 }
 
 // setPlanFilePath records where a task's plan landed (see planfile.go) and
-// Plan tab can appear mid-run rather than only once the whole run finishes.
+// refreshes the detail pane immediately, so the Plan tab can appear or
+// update mid-run rather than only once the whole run finishes. syncDetail
+// always runs even when path is unchanged — plan revisions (cursor
+// createPlanToolCall, claude Edit) rewrite the same file.
 func (m *Model) setPlanFilePath(taskID, path string) {
 	for i := range m.tasks {
 		if m.tasks[i].ID != taskID {
 			continue
 		}
-		if m.tasks[i].PlanFilePath == path {
-			return
+		if m.tasks[i].PlanFilePath != path {
+			m.tasks[i].PlanFilePath = path
+			m.persistTask(m.tasks[i])
 		}
-		m.tasks[i].PlanFilePath = path
-		m.persistTask(m.tasks[i])
 		break
 	}
 	m.syncDetail()

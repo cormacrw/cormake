@@ -85,3 +85,52 @@ func TestHandlePlanToolUsePersistsCursorPlan(t *testing.T) {
 		t.Errorf("plan file = %q, want markdown body", string(data))
 	}
 }
+
+func TestHandlePlanToolUseRevisesExistingCursorPlan(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	task := domain.Task{
+		ID:           "task-1",
+		Status:       domain.StatusPlanning,
+		PlanFilePath: st.PlanPath("task-1"),
+	}
+	if err := os.WriteFile(task.PlanFilePath, []byte("# Original\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveTask(task); err != nil {
+		t.Fatalf("SaveTask: %v", err)
+	}
+
+	m := Model{
+		store: st,
+		tasks: []domain.Task{task},
+	}
+
+	m.handlePlanToolUse(task.ID, "createPlanToolCall", `{"plan":"# Revised\n\nupdated per feedback"}`)
+
+	data, err := os.ReadFile(st.PlanPath(task.ID))
+	if err != nil {
+		t.Fatalf("ReadFile plan: %v", err)
+	}
+	if string(data) != "# Revised\n\nupdated per feedback" {
+		t.Errorf("revised plan file = %q, want updated body", string(data))
+	}
+	if got := m.readPlanFile(m.tasks[0]); got != "# Revised\n\nupdated per feedback" {
+		t.Errorf("readPlanFile = %q, want revised content", got)
+	}
+}
+
+func TestExtractKnownPlanFilePath(t *testing.T) {
+	known := "/home/user/.cormake/plans/task-1.md"
+	got, ok := extractKnownPlanFilePath("editToolCall", `{"path":"`+known+`"}`, known)
+	if !ok || got != known {
+		t.Errorf("extractKnownPlanFilePath = (%q, %v), want (%q, true)", got, ok, known)
+	}
+	if _, ok := extractKnownPlanFilePath("editToolCall", `{"path":"/other.md"}`, known); ok {
+		t.Error("wrong path should not match")
+	}
+}
