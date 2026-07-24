@@ -76,7 +76,7 @@ func (m *Model) openNewTaskWizard() tea.Cmd {
 	w := &newTaskWizard{}
 	w.titleForm = huh.NewForm(huh.NewGroup(
 		huh.NewInput().Title("Task name").Value(&w.title).CharLimit(200).Validate(requireTaskTitle),
-	)).WithWidth(56).WithShowHelp(true)
+	)).WithWidth(56).WithShowHelp(false)
 	m.wizard = w
 	return w.titleForm.Init()
 }
@@ -224,7 +224,7 @@ func (m Model) advanceWizardFromTitle() (tea.Model, tea.Cmd) {
 	w.step = wizardStepRepo
 	w.repoForm = huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().Title("Repo").Options(options...).Value(&w.repoID),
-	)).WithWidth(56).WithShowHelp(true)
+	)).WithWidth(56).WithShowHelp(false)
 	return m, w.repoForm.Init()
 }
 
@@ -239,7 +239,7 @@ func (m Model) backWizardFromRepo() (tea.Model, tea.Cmd) {
 	w.step = wizardStepTitle
 	w.titleForm = huh.NewForm(huh.NewGroup(
 		huh.NewInput().Title("Task name").Value(&w.title).CharLimit(200).Validate(requireTaskTitle),
-	)).WithWidth(56).WithShowHelp(true)
+	)).WithWidth(56).WithShowHelp(false)
 	return m, w.titleForm.Init()
 }
 
@@ -277,7 +277,7 @@ func (m Model) backWizardFromTarget() (tea.Model, tea.Cmd) {
 	w.step = wizardStepRepo
 	w.repoForm = huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().Title("Repo").Options(options...).Value(&w.repoID),
-	)).WithWidth(56).WithShowHelp(true)
+	)).WithWidth(56).WithShowHelp(false)
 	return m, w.repoForm.Init()
 }
 
@@ -336,7 +336,7 @@ func (m Model) advanceWizardFromSource() (tea.Model, tea.Cmd) {
 	w.confirmForm = huh.NewForm(huh.NewGroup(
 		huh.NewConfirm().Title("Create task?").Description(recap).
 			Affirmative("Create").Negative("Cancel").Value(&w.confirmed),
-	)).WithWidth(56).WithShowHelp(true)
+	)).WithWidth(56).WithShowHelp(false)
 	return m, w.confirmForm.Init()
 }
 

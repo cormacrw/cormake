@@ -65,7 +65,7 @@ func newBranchPicker(title string, branches []string, allowNew bool, sentinelLab
 	}
 
 	sel := huh.NewSelect[string]().Title(title).Options(options...).Value(&p.mode)
-	p.selectForm = huh.NewForm(huh.NewGroup(sel)).WithWidth(56).WithShowHelp(true)
+	p.selectForm = huh.NewForm(huh.NewGroup(sel)).WithWidth(56).WithShowHelp(false)
 	return p
 }
 
@@ -146,7 +146,7 @@ func (p *branchPicker) Update(msg tea.Msg) tea.Cmd {
 			return cmd
 		}
 		input := huh.NewInput().Title("Branch name").Value(&p.value).CharLimit(200).Validate(requireBranchName)
-		p.inputForm = huh.NewForm(huh.NewGroup(input)).WithWidth(56).WithShowHelp(true)
+		p.inputForm = huh.NewForm(huh.NewGroup(input)).WithWidth(56).WithShowHelp(false)
 		return tea.Batch(cmd, p.inputForm.Init())
 	}
 	return cmd
