@@ -13,10 +13,11 @@ import (
 )
 
 // wizardStep is which page of the new-task wizard is currently active. The
-// steps always run in this order; there's no back-navigation (see
-// updateNewTaskWizard) — correcting a choice after the fact goes through
-// the standalone keys.ChangeTargetBranch/ChangeSourceBranch shortcuts
-// instead.
+// steps always run in this order; shift+tab steps back to the previous one
+// (see updateNewTaskWizard's backWizardFrom* handlers), rebuilding that
+// step's form with whatever was already entered preserved. The standalone
+// keys.ChangeTargetBranch/ChangeSourceBranch shortcuts remain available too,
+// for correcting a choice after the task's already been created.
 type wizardStep int
 
 const (
@@ -109,6 +110,13 @@ func (m *Model) createTaskQuick(title string) {
 // engaged (see branchPicker.Searching) — there esc is forwarded into the
 // picker instead, so it backs out of the search rather than closing the
 // whole wizard.
+//
+// shift+tab steps back to the previous step instead, same exception for an
+// engaged search box. huh's own Prev binding is shift+tab too, but every
+// step's form here has exactly one field, so huh always treats it as the
+// first field in the form and disables its own Prev binding for it — this
+// handler intercepting shift+tab first means huh never gets a chance to
+// no-op it anyway.
 func (m Model) updateNewTaskWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 	w := m.wizard
 	if km, ok := msg.(tea.KeyMsg); ok {
@@ -131,6 +139,20 @@ func (m Model) updateNewTaskWizard(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.wizard = nil
 			m.createTaskQuick(title)
 			return m, nil
+		}
+
+		if km.String() == "shift+tab" && !w.activePickerSearching() {
+			switch w.step {
+			case wizardStepRepo:
+				return m.backWizardFromRepo()
+			case wizardStepTarget:
+				return m.backWizardFromTarget()
+			case wizardStepSource:
+				return m.backWizardFromSource()
+			case wizardStepConfirm:
+				return m.backWizardFromConfirm()
+			}
+			return m, nil // wizardStepTitle: already the first step
 		}
 	}
 
@@ -206,6 +228,21 @@ func (m Model) advanceWizardFromTitle() (tea.Model, tea.Cmd) {
 	return m, w.repoForm.Init()
 }
 
+// backWizardFromRepo moves from the repo step back to the title step. The
+// title itself is untouched — it's already bound to w.title, so a rebuilt
+// form just picks that value back up — this only needs to swap in a fresh
+// (not StateCompleted) form, since huh has no exported way to un-complete
+// one (see backWizardFromTarget for why forms get rebuilt rather than
+// reused across a back-and-forth).
+func (m Model) backWizardFromRepo() (tea.Model, tea.Cmd) {
+	w := m.wizard
+	w.step = wizardStepTitle
+	w.titleForm = huh.NewForm(huh.NewGroup(
+		huh.NewInput().Title("Task name").Value(&w.title).CharLimit(200).Validate(requireTaskTitle),
+	)).WithWidth(56).WithShowHelp(true)
+	return m, w.titleForm.Init()
+}
+
 // advanceWizardFromRepo moves from the repo step to the target-branch
 // step, resolving the picked repo's filesystem path once so the target and
 // source steps can both list its branches without re-resolving it.
@@ -224,6 +261,26 @@ func (m Model) advanceWizardFromRepo() (tea.Model, tea.Cmd) {
 	return m, w.targetPicker.Init()
 }
 
+// backWizardFromTarget moves from the target-branch step back to the repo
+// step, rebuilding repoForm with the previously picked repo preselected.
+// A rebuild is required rather than reusing w.repoForm as-is: once a huh.Form
+// completes, it marks itself quitting internally (unexported, no reset
+// method) and View renders empty forever after — so every backWizardFrom*
+// here rebuilds its destination step's form/picker from scratch, seeded with
+// whatever was already chosen so nothing already entered is lost.
+func (m Model) backWizardFromTarget() (tea.Model, tea.Cmd) {
+	w := m.wizard
+	options := make([]huh.Option[string], len(w.repos))
+	for i, r := range w.repos {
+		options[i] = huh.NewOption(r.Name, r.ID)
+	}
+	w.step = wizardStepRepo
+	w.repoForm = huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().Title("Repo").Options(options...).Value(&w.repoID),
+	)).WithWidth(56).WithShowHelp(true)
+	return m, w.repoForm.Init()
+}
+
 // advanceWizardFromTarget moves from the target-branch step to the
 // source-branch step, defaulting to and preselecting the active workspace's
 // EffectiveDefaultTargetBranch.
@@ -238,6 +295,32 @@ func (m Model) advanceWizardFromTarget() (tea.Model, tea.Cmd) {
 		branches, true, "other (type a branch name)", def, def,
 	)
 	return m, w.sourcePicker.Init()
+}
+
+// backWizardFromSource moves from the source-branch step back to the
+// target-branch step, rebuilding the picker so whatever was already chosen
+// there — an existing branch, or a typed new-branch name — comes back
+// preselected/prefilled rather than resetting to the step's original
+// defaults.
+func (m Model) backWizardFromSource() (tea.Model, tea.Cmd) {
+	w := m.wizard
+	branches := listLocalBranches(w.repoPath)
+	ws := m.workspaces[m.activeWS]
+	suggested := suggestTargetBranchName(ws.PeekNextDisplayID())
+
+	def := w.targetPicker.mode
+	value := suggested
+	if def == newBranchSentinel {
+		def = ""
+		value = w.targetPicker.value // preserve the name they'd typed
+	}
+
+	w.step = wizardStepTarget
+	w.targetPicker = newBranchPicker(
+		"Target branch — where this task's work will be committed",
+		branches, true, fmt.Sprintf("+ create new branch (%q)", suggested), value, def,
+	)
+	return m, w.targetPicker.Init()
 }
 
 // advanceWizardFromSource moves from the source-branch step to the final
@@ -257,6 +340,29 @@ func (m Model) advanceWizardFromSource() (tea.Model, tea.Cmd) {
 	return m, w.confirmForm.Init()
 }
 
+// backWizardFromConfirm moves from the final confirmation back to the
+// source-branch step, rebuilding the picker so whatever was already chosen
+// there comes back preselected/prefilled.
+func (m Model) backWizardFromConfirm() (tea.Model, tea.Cmd) {
+	w := m.wizard
+	branches := listLocalBranches(w.repoPath)
+	wsDefault := m.workspaces[m.activeWS].EffectiveDefaultTargetBranch()
+
+	mode := w.sourcePicker.mode
+	def, value := mode, wsDefault
+	if mode == newBranchSentinel {
+		def = ""
+		value = w.sourcePicker.value // preserve the name they'd typed
+	}
+
+	w.step = wizardStepSource
+	w.sourcePicker = newBranchPicker(
+		"Source branch — where this work will eventually be merged",
+		branches, true, "other (type a branch name)", value, def,
+	)
+	return m, w.sourcePicker.Init()
+}
+
 // renderNewTaskWizard draws whichever step is currently active, centered
 // over the full screen like every other modal.
 func (m Model) renderNewTaskWizard() string {
@@ -266,13 +372,13 @@ func (m Model) renderNewTaskWizard() string {
 	case wizardStepTitle:
 		content = w.titleForm.View() + "\n" + tabInfoStyle.Render("[enter] next   [ctrl+enter] quick create   [esc] cancel")
 	case wizardStepRepo:
-		content = w.repoForm.View()
+		content = w.repoForm.View() + "\n" + tabInfoStyle.Render("[enter] next   [shift+tab] back   [esc] cancel")
 	case wizardStepTarget:
-		content = w.targetPicker.View()
+		content = w.targetPicker.View() + "\n" + tabInfoStyle.Render("[enter] next   [shift+tab] back   [esc] cancel")
 	case wizardStepSource:
-		content = w.sourcePicker.View()
+		content = w.sourcePicker.View() + "\n" + tabInfoStyle.Render("[enter] next   [shift+tab] back   [esc] cancel")
 	case wizardStepConfirm:
-		content = w.confirmForm.View()
+		content = w.confirmForm.View() + "\n" + tabInfoStyle.Render("[shift+tab] back   [esc] cancel")
 	}
 	box := focusedPaneBorderStyle().Padding(1, 3).Render("New task\n\n" + content)
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
