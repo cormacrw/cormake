@@ -142,4 +142,7 @@ var keys = KeyMap{
 	Help:    key.NewBinding(key.WithKeys("?")),
 }
 
-const footerHelp = " [n]ew [/]filter [enter]edit [p]lan [e]xecute [r]eview [i]nput [P]R [b]rowser [m]ark complete [t]arget-branch [s]ource-branch [a]rchive [d]elete [w]orkspaces tabs:1-6/[/] arrows:scroll [?]help [q]uit"
+// footerHelp shows only the most-used shortcuts on the main status bar —
+// the full set (tab-switching, scrolling, and everything below) lives in
+// the [?]help modal instead (see renderHelpModal).
+const footerHelp = " [n]ew [/]filter [enter]edit [p]lan [e]xecute [r]eview [m]ark complete [a]rchive [d]elete [w]orkspaces [?]help [q]uit"

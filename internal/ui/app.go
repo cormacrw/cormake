@@ -57,6 +57,11 @@ type Model struct {
 	workspaceModalOpen bool
 	workspaceCursor    int
 
+	// helpModalOpen shows the full keyboard-shortcut reference (see
+	// renderHelpModal) — everything trimmed off the main footerHelp to keep
+	// it short lives here instead.
+	helpModalOpen bool
+
 	// wizard is non-nil while the New Task wizard (see newtask.go) is open —
 	// title, repo, target branch, source branch, then a recap confirmation.
 	wizard *newTaskWizard
@@ -415,6 +420,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if msg, ok := msg.(tea.KeyMsg); ok {
+		if m.helpModalOpen {
+			return m.updateHelpModal(msg)
+		}
+
 		if m.workspaceModalOpen {
 			return m.updateWorkspaceModal(msg)
 		}
@@ -578,7 +587,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detail.CycleTab(1)
 			return m, nil
 
-		case key.Matches(msg, keys.Cancel, keys.Help):
+		case key.Matches(msg, keys.Help):
+			m.helpModalOpen = true
+			return m, nil
+
+		case key.Matches(msg, keys.Cancel):
 			// Reserved: needs real storage/orchestrator wiring that doesn't
 			// exist yet. Intentionally a no-op rather than pretending to work.
 			return m, nil
@@ -589,6 +602,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.tasklist, cmd = m.tasklist.Update(msg)
 	m.syncDetail()
 	return m, cmd
+}
+
+// updateHelpModal handles input while the help modal is open: any key
+// closes it, mirroring how it's opened (a single [?]).
+func (m Model) updateHelpModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.helpModalOpen = false
+	return m, nil
 }
 
 // updateWorkspaceModal handles input while the workspace picker is open:
@@ -2136,6 +2156,10 @@ func (m Model) View() string {
 		return ""
 	}
 
+	if m.helpModalOpen {
+		return m.renderHelpModal()
+	}
+
 	if m.workspaceModalOpen {
 		return m.renderWorkspaceModal()
 	}
@@ -2201,6 +2225,96 @@ func (m Model) renderTaskTabs(width int) string {
 	}
 	tabs := " " + strings.Join(rendered, "  ")
 	return lipgloss.NewStyle().Width(width).MaxWidth(width).Height(1).MaxHeight(1).Render(tabs)
+}
+
+// helpSection is one titled group of shortcuts in the help modal (see
+// renderHelpModal) — keys/descriptions are aligned within a section, not
+// across sections, since they vary widely in width.
+type helpSection struct {
+	title string
+	rows  [][2]string // [key, description]
+}
+
+// helpSections is the full keyboard-shortcut reference shown by the help
+// modal — every binding in KeyMap belongs somewhere here, including the
+// ones trimmed off footerHelp (tab-switching digits, arrow-key scrolling)
+// to keep the main status bar short.
+var helpSections = []helpSection{
+	{
+		title: "Navigation",
+		rows: [][2]string{
+			{"j / k", "move down / up in the task list"},
+			{"h / l", "switch task tab (Todo/Archived/Completed)"},
+			{"↑ ↓ ← →", "scroll the detail pane"},
+			{"ctrl+u / pgup", "page up"},
+			{"ctrl+d / pgdn", "page down"},
+		},
+	},
+	{
+		title: "Task actions",
+		rows: [][2]string{
+			{"n", "new task"},
+			{"/", "filter"},
+			{"enter", "edit task"},
+			{"p", "plan"},
+			{"e", "execute"},
+			{"r", "review"},
+			{"i", "send a message"},
+			{"P", "open PR"},
+			{"b", "open PR in browser"},
+			{"m", "mark complete"},
+			{"t", "change target branch"},
+			{"s", "change source branch"},
+			{"a", "archive / restore"},
+			{"d", "delete"},
+			{"w", "switch workspace"},
+		},
+	},
+	{
+		title: "Detail tabs",
+		rows: [][2]string{
+			{"1-6", "description / plan / summary / log / PR desc / PR comments"},
+			{"[ / ]", "cycle detail tabs"},
+		},
+	},
+	{
+		title: "Other",
+		rows: [][2]string{
+			{"?", "toggle this help"},
+			{"q", "quit"},
+		},
+	},
+}
+
+// renderHelpModal draws the full keyboard-shortcut reference, centered over
+// the full screen — any key closes it (see updateHelpModal).
+func (m Model) renderHelpModal() string {
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.Accent())
+	keyStyle := lipgloss.NewStyle().Bold(true)
+
+	lines := []string{"Keyboard shortcuts", ""}
+	for si, section := range helpSections {
+		if si > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, headerStyle.Render(section.title))
+
+		keyWidth := 0
+		for _, row := range section.rows {
+			if w := lipgloss.Width(row[0]); w > keyWidth {
+				keyWidth = w
+			}
+		}
+		for _, row := range section.rows {
+			key := keyStyle.Render(row[0])
+			pad := strings.Repeat(" ", keyWidth-lipgloss.Width(row[0]))
+			lines = append(lines, "  "+key+pad+"  "+row[1])
+		}
+	}
+	lines = append(lines, "", tabInfoStyle.Render("[any key] close"))
+
+	box := focusedPaneBorderStyle().Padding(1, 3).Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 // renderWorkspaceModal draws the workspace picker, centered over the full
