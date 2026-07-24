@@ -51,7 +51,7 @@ func (d Delegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
 	}
 
 	_, glyph := ti.Task.DisplayStage()
-	if d.Frame != nil && (ti.Task.Status == domain.StatusPlanning || ti.Task.Status == domain.StatusInProgress) {
+	if d.Frame != nil && (ti.Task.Status == domain.StatusPlanning || ti.Task.Status == domain.StatusInProgress || ti.Task.Status == domain.StatusOpeningPR) {
 		glyph = *d.Frame
 	}
 

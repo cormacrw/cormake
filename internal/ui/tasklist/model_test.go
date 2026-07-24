@@ -30,7 +30,7 @@ func TestToItemsSplitsAndOrdersSections(t *testing.T) {
 		gotIDs = append(gotIDs, i.Task.ID)
 	}
 
-	wantHeaders := []string{"PLANNED / READY FOR REVIEW", "IN PROGRESS", "OTHER"}
+	wantHeaders := []string{"PLANNED / READY FOR REVIEW / IN REVIEW", "IN PROGRESS", "OTHER"}
 	if len(headers) != len(wantHeaders) {
 		t.Fatalf("headers = %v, want %v", headers, wantHeaders)
 	}
@@ -67,7 +67,7 @@ func TestToItemsOmitsEmptySectionHeaderWhenOnlyTwoPopulated(t *testing.T) {
 		}
 	}
 
-	wantHeaders := []string{"PLANNED / READY FOR REVIEW", "IN PROGRESS"}
+	wantHeaders := []string{"PLANNED / READY FOR REVIEW / IN REVIEW", "IN PROGRESS"}
 	if len(headers) != len(wantHeaders) {
 		t.Fatalf("headers = %v, want %v", headers, wantHeaders)
 	}

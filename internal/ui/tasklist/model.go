@@ -118,9 +118,9 @@ func toItems(tasks []domain.Task) []list.Item {
 	var top, active, bottom []domain.Task
 	for _, t := range tasks {
 		switch t.Status {
-		case domain.StatusPlanned, domain.StatusReadyForReview:
+		case domain.StatusPlanned, domain.StatusReadyForReview, domain.StatusInReview:
 			top = append(top, t)
-		case domain.StatusPlanning, domain.StatusInProgress:
+		case domain.StatusPlanning, domain.StatusInProgress, domain.StatusOpeningPR:
 			active = append(active, t)
 		default:
 			bottom = append(bottom, t)
@@ -145,7 +145,7 @@ func toItems(tasks []domain.Task) []list.Item {
 
 	items := make([]list.Item, 0, len(tasks)+3)
 	if showHeaders && len(top) > 0 {
-		items = append(items, Item{Header: true, HeaderText: "PLANNED / READY FOR REVIEW"})
+		items = append(items, Item{Header: true, HeaderText: "PLANNED / READY FOR REVIEW / IN REVIEW"})
 	}
 	for _, t := range top {
 		items = append(items, Item{Task: t})

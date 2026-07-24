@@ -135,6 +135,12 @@ type Model struct {
 	// active is empty and restart on demand rather than ticking forever.
 	spinnerTicking bool
 
+	// prPollTicking is the same self-perpetuating-chain guard as
+	// spinnerTicking above, but for the background PR-status poll (see
+	// pr.go's ensurePRPollTicking/handlePRPollTick) — stops once no task is
+	// IN_REVIEW, restarts on demand once one is again.
+	prPollTicking bool
+
 	// resultSeen tracks, per task ID, whether an EventResult has been
 	// observed for its current run — the primary signal handleTaskFinished
 	// uses to decide success vs. failure, since an Attach-produced Handle's
@@ -278,11 +284,23 @@ func replayFileFor(backend domain.AgentBackend) func(taskID, path string, fromOf
 // message, in Update) sorts out which and reconnects accordingly.
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{waitForEvent(m.eventsCh)}
+	hasOpenPR := false
 	for _, t := range m.tasks {
-		if t.Status == domain.StatusPlanning || t.Status == domain.StatusInProgress {
+		if t.Status == domain.StatusPlanning || t.Status == domain.StatusInProgress || t.Status == domain.StatusOpeningPR {
 			taskID := t.ID
 			cmds = append(cmds, func() tea.Msg { return reconnectTaskMsg{TaskID: taskID} })
 		}
+		if t.Status == domain.StatusInReview {
+			hasOpenPR = true
+		}
+	}
+	if hasOpenPR {
+		// Kick the polling chain's first link directly rather than through
+		// ensurePRPollTicking — Init has a value receiver (see
+		// reconnectTaskMsg's doc comment above) so it can't set
+		// m.prPollTicking itself; the first prPollTickMsg this produces sets
+		// it once handled in Update (see handlePRPollTick).
+		cmds = append(cmds, prPollTickCmd())
 	}
 	return tea.Batch(cmds...)
 }
@@ -340,11 +358,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForEvent(m.eventsCh)
 
 	case taskFinishedMsg:
-		m.handleTaskFinished(msg)
-		return m, waitForEvent(m.eventsCh)
+		cmd := m.handleTaskFinished(msg)
+		return m, tea.Batch(cmd, waitForEvent(m.eventsCh))
 
 	case reconnectTaskMsg:
 		return m, m.reconnectTask(msg.TaskID)
+
+	case prPollTickMsg:
+		return m, m.handlePRPollTick()
+
+	case prQueryMsg:
+		return m, m.handlePRQuery(msg)
+
+	case openURLMsg:
+		if msg.err != nil {
+			m.appendLogLine(msg.taskID, logformat.LogCormakeLine("failed to open browser: "+msg.err.Error()))
+		}
+		return m, nil
 
 	case spinner.TickMsg:
 		cmd := m.tasklist.UpdateSpinner(msg)
@@ -456,6 +486,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.openCompleteModal()
 			return m, nil
 
+		case key.Matches(msg, keys.OpenPR):
+			m.openPRConfirm()
+			return m, nil
+
+		case key.Matches(msg, keys.OpenPRBrowser):
+			if t, ok := m.tasklist.Selected(); ok && t.PRURL != "" {
+				return m, openURLCmd(t.ID, t.PRURL)
+			}
+			return m, nil
+
 		case key.Matches(msg, keys.Open):
 			if t, ok := m.tasklist.Selected(); ok {
 				return m, openInEditorCmd(t)
@@ -520,6 +560,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, keys.TabLog):
 			m.detail.ShowLog()
+			return m, nil
+
+		case key.Matches(msg, keys.TabPRDesc):
+			m.detail.ShowPRDescription()
+			return m, nil
+
+		case key.Matches(msg, keys.TabPRComments):
+			m.detail.ShowPRComments()
 			return m, nil
 
 		case key.Matches(msg, keys.TabPrev):
@@ -627,6 +675,7 @@ const (
 	confirmKindTransition confirmKind = iota
 	confirmKindDelete
 	confirmKindComplete
+	confirmKindOpenPR
 )
 
 // openConfirm stages a Plan/Execute status change behind a confirmation
@@ -682,29 +731,59 @@ func (m *Model) openDeleteConfirm() {
 
 // openCompleteModal stages finalizing the selected task behind a
 // confirmation modal — only eligible once it's actually been executed (has
-// a worktree) and is ready for review. Its work is already committed onto
-// TargetBranch throughout execution (see handleTaskFinished), so there's no
-// branch name left to ask for — just a confirmation that it's really done.
+// a worktree) and is ready for review, or is sitting IN_REVIEW awaiting a PR
+// merge. Its work is already committed onto TargetBranch throughout
+// execution (see handleTaskFinished), so there's no branch name left to ask
+// for — just a confirmation that it's really done. A task with an open PR
+// that doesn't look merged yet (per the last poll, see ui.handlePRQuery)
+// gets a pointed warning rather than a block — the user always has the
+// final say on when a task is actually done.
 func (m *Model) openCompleteModal() {
+	t, ok := m.tasklist.Selected()
+	if !ok || t.WorktreePath == "" {
+		return
+	}
+	if t.Status != domain.StatusReadyForReview && t.Status != domain.StatusInReview {
+		return
+	}
+	message := fmt.Sprintf("Mark %q complete? This commits any outstanding changes and removes the worktree.", t.Title)
+	if t.Status == domain.StatusInReview {
+		if snap, ok := m.detail.PRSnapshot(t.ID); !ok || !strings.EqualFold(snap.State, "MERGED") {
+			message = fmt.Sprintf("Mark %q complete even though its PR doesn't look merged yet? This commits any outstanding changes and removes the worktree.", t.Title)
+		}
+	}
+	m.confirmModalOpen = true
+	m.confirmMessage = message
+	m.confirmKind = confirmKindComplete
+	m.confirmTaskID = t.ID
+}
+
+// openPRConfirm stages opening a pull request for the selected task behind
+// a confirmation modal — only eligible for a READY_FOR_REVIEW task that's
+// actually been executed (has a worktree, and therefore a SessionID to
+// resume — see startOpenPR).
+func (m *Model) openPRConfirm() {
 	t, ok := m.tasklist.Selected()
 	if !ok || t.Status != domain.StatusReadyForReview || t.WorktreePath == "" {
 		return
 	}
 	m.confirmModalOpen = true
-	m.confirmMessage = fmt.Sprintf("Mark %q complete? This commits any outstanding changes and removes the worktree.", t.Title)
-	m.confirmKind = confirmKindComplete
+	m.confirmMessage = fmt.Sprintf("Open a pull request for %q? claude will push the branch and create it with gh.", t.Title)
+	m.confirmKind = confirmKindOpenPR
 	m.confirmTaskID = t.ID
 }
 
 // openInputModal stages a free-form message to send to the selected task's
-// existing agent session — only eligible for PLANNED or READY_FOR_REVIEW
-// tasks, the two "stopped and waiting on a person" states outside of
-// Review's revdiff annotation flow. The textarea's placeholder is
-// re-labeled per task (t.AgentBackend), since a message sent here resumes
+// existing agent session — only eligible for PLANNED, READY_FOR_REVIEW, or
+// IN_REVIEW tasks, the "stopped and waiting on a person" states outside of
+// Review's revdiff annotation flow. IN_REVIEW is included so PR review
+// comments from GitHub can be pasted in and addressed the same way as any
+// other revision feedback (see sendInputPrompt). The textarea's placeholder
+// is re-labeled per task (t.AgentBackend), since a message sent here resumes
 // whichever backend actually ran this task, not necessarily claude.
 func (m *Model) openInputModal() tea.Cmd {
 	t, ok := m.tasklist.Selected()
-	if !ok || (t.Status != domain.StatusPlanned && t.Status != domain.StatusReadyForReview) {
+	if !ok || (t.Status != domain.StatusPlanned && t.Status != domain.StatusReadyForReview && t.Status != domain.StatusInReview) {
 		return nil
 	}
 	m.inputTaskID = t.ID
@@ -743,15 +822,18 @@ func (m Model) updateInputModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // sendInputPrompt resumes the task openInputModal staged (by ID, same
 // resolve-once pattern as startCompleteTask) with a free-form user message —
 // a Plan-mode resume for a PLANNED task, or a Complete-mode resume in its
-// existing worktree for a READY_FOR_REVIEW task.
+// existing worktree for a READY_FOR_REVIEW or IN_REVIEW task (the latter is
+// how PR review comments get addressed — see handleTaskFinished for how the
+// task lands back on IN_REVIEW, rather than READY_FOR_REVIEW, once this
+// finishes, and how its new commit gets pushed to the PR's branch).
 func (m *Model) sendInputPrompt(message string) tea.Cmd {
 	for _, t := range m.tasks {
 		if t.ID != m.inputTaskID {
 			continue
 		}
 		m.appendLogLine(t.ID, logformat.LogCormakeLine("sending message to "+logformat.AgentBackendLabel(t.AgentBackend)))
-		if t.Status == domain.StatusReadyForReview {
-			return m.runExecuteAgent(t, message+executeSummaryInstruction, t.SessionID)
+		if t.Status == domain.StatusReadyForReview || t.Status == domain.StatusInReview {
+			return m.runExecuteAgent(t, message+executeSummaryInstruction, t.SessionID, domain.StatusInProgress)
 		}
 		return m.runPlanAgent(t, message, t.SessionID)
 	}
@@ -879,6 +961,10 @@ func (m Model) updateConfirmModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.confirmKind == confirmKindComplete {
 			cmd := m.startCompleteTask()
+			return m, cmd
+		}
+		if m.confirmKind == confirmKindOpenPR {
+			cmd := m.startOpenPR()
 			return m, cmd
 		}
 		if m.confirmTo == domain.StatusPlanning {
@@ -1310,14 +1396,22 @@ func (m *Model) startExecuteRun() tea.Cmd {
 		return nil
 	}
 	t.AgentBackend = m.confirmBackend
-	return m.runExecuteAgent(t, buildExecutePrompt(t), "")
+	return m.runExecuteAgent(t, buildExecutePrompt(t), "", domain.StatusInProgress)
 }
 
 // runExecuteAgent spawns a Complete-mode claude run for t with the given
-// prompt, shared by the initial Execute action and the
-// revise-after-code-review flow (see revdiff.go). resumeSessionID, when
-// non-empty, continues t's existing session in its existing worktree
-// instead of starting a fresh one.
+// prompt, shared by the initial Execute action, the revise-after-code-review
+// flow (see revdiff.go), free-form input (sendInputPrompt), and opening a PR
+// (startOpenPR). resumeSessionID, when non-empty, continues t's existing
+// session in its existing worktree instead of starting a fresh one.
+//
+// targetStatus is what the task's Status becomes while this run is in
+// flight — StatusInProgress for every case above except opening a PR, which
+// uses StatusOpeningPR instead so the task list/detail pane read distinctly
+// while claude pushes the branch and runs `gh pr create` (see startOpenPR).
+// handleTaskFinished reads the in-flight Status back off the task to decide
+// what it becomes once the run is over, so this is the only place that
+// needs to know which purpose a given run serves.
 //
 // A fresh run creates the worktree itself (see resolveTaskWorktree, which
 // calls createWorktree in complete.go) rather than asking claude to via
@@ -1328,7 +1422,7 @@ func (m *Model) startExecuteRun() tea.Cmd {
 // means WorktreePath is known synchronously here rather than waited on from
 // the run's first event. If the task was already planned, this reuses the
 // same worktree the plan run opened (see resolveTaskWorktree).
-func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) tea.Cmd {
+func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string, targetStatus domain.Status) tea.Cmd {
 	repoPath, ok := m.repoPath(t.RepoID)
 	if !ok || repoPath == "" {
 		m.appendLogLine(t.ID, logformat.LogCormakeLine("cannot start — task has no repo assigned"))
@@ -1376,7 +1470,7 @@ func (m *Model) runExecuteAgent(t domain.Task, prompt, resumeSessionID string) t
 
 	for i := range m.tasks {
 		if m.tasks[i].ID == t.ID {
-			m.tasks[i].Status = domain.StatusInProgress
+			m.tasks[i].Status = targetStatus
 			m.tasks[i].SessionID = sessionID
 			m.tasks[i].WorktreeName = wtName
 			m.tasks[i].WorktreeBaseRef = baseRef
@@ -1449,7 +1543,7 @@ func (m *Model) handleRevdiffFinished(msg revdiffFinishedMsg) tea.Cmd {
 		}
 		m.appendLogLine(t.ID, logformat.LogCormakeLine("sending review feedback to "+logformat.AgentBackendLabel(t.AgentBackend)+" for revision"))
 		if msg.kind == reviewKindExecute {
-			return m.runExecuteAgent(t, buildExecuteRevisePrompt(msg.annotations), t.SessionID)
+			return m.runExecuteAgent(t, buildExecuteRevisePrompt(msg.annotations), t.SessionID, domain.StatusInProgress)
 		}
 		return m.runPlanAgent(t, buildRevisePrompt(msg.annotations, t.AgentBackend, t.PlanFilePath), t.SessionID)
 	}
@@ -1682,18 +1776,23 @@ func (m *Model) refreshTaskDetail(taskID string) {
 // squashed until the eventual completeTaskCmd commit, so a task's worktree
 // history is easy to step through attempt by attempt during review. Plan
 // runs are excluded even though they now have a worktree too (see
-	// resolveTaskWorktree) — plan-mode never writes into it. The commit body is
-	// CommitDescription when the agent supplied a ```cormake-commit block,
-	// otherwise ResultSummary (see executeSummaryInstruction,
-	// parseAgentResult, and handleAgentEvent's EventResult case) — freshly
-	// overwritten by this run's own EventResult before taskFinishedMsg ever
-	// arrives here, so it describes this attempt specifically rather than
-	// some earlier one.
-func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
+// resolveTaskWorktree) — plan-mode never writes into it. The commit body is
+// CommitDescription when the agent supplied a ```cormake-commit block,
+// otherwise ResultSummary (see executeSummaryInstruction,
+// parseAgentResult, and handleAgentEvent's EventResult case) — freshly
+// overwritten by this run's own EventResult before taskFinishedMsg ever
+// arrives here, so it describes this attempt specifically rather than
+// some earlier one.
+// handleTaskFinished additionally returns a tea.Cmd — nil in every case
+// except a just-finished StatusOpeningPR run (see below), where it queries
+// gh directly for the branch to confirm the PR actually landed rather than
+// trusting the agent's own prose.
+func (m *Model) handleTaskFinished(msg taskFinishedMsg) tea.Cmd {
 	delete(m.active, msg.TaskID)
 	sawResult := m.resultSeen[msg.TaskID]
 	delete(m.resultSeen, msg.TaskID)
 
+	var cmd tea.Cmd
 	for i := range m.tasks {
 		if m.tasks[i].ID != msg.TaskID {
 			continue
@@ -1708,6 +1807,12 @@ func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 		// nothing to commit, and counting it would leave a gap in the
 		// attempt numbering with no matching commit.
 		wasPlanning := m.tasks[i].Status == domain.StatusPlanning
+		// A run that was opening a PR (see runExecuteAgent's targetStatus
+		// doc comment) doesn't get a case in the switch below — on success
+		// it deliberately stays StatusOpeningPR until the gh query kicked
+		// off after this loop confirms the PR actually exists (see
+		// handlePRQuery), rather than being marked IN_REVIEW on trust alone.
+		wasOpeningPR := m.tasks[i].Status == domain.StatusOpeningPR
 		switch {
 		case msg.Err != nil:
 			m.tasks[i].Status = domain.StatusFailed
@@ -1718,7 +1823,16 @@ func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 		case m.tasks[i].Status == domain.StatusPlanning:
 			m.tasks[i].Status = domain.StatusPlanned
 		case m.tasks[i].Status == domain.StatusInProgress:
-			m.tasks[i].Status = domain.StatusReadyForReview
+			// A task with an already-open PR (PRNumber set) landing back
+			// here means this was a revise-after-review-feedback run (see
+			// sendInputPrompt/handleRevdiffFinished) — it belongs back on
+			// IN_REVIEW, not READY_FOR_REVIEW, so its PR panes/polling keep
+			// working and Complete still carries its "PR merged?" check.
+			if m.tasks[i].PRNumber != 0 {
+				m.tasks[i].Status = domain.StatusInReview
+			} else {
+				m.tasks[i].Status = domain.StatusReadyForReview
+			}
 		}
 		if !wasPlanning && m.tasks[i].WorktreePath != "" {
 			m.tasks[i].ExecutionAttempts++
@@ -1728,13 +1842,26 @@ func (m *Model) handleTaskFinished(msg taskFinishedMsg) {
 			}
 			if err := commitWorktreeChanges(m.tasks[i].WorktreePath, commitMsg); err != nil {
 				m.appendLogLine(m.tasks[i].ID, logformat.LogCormakeLine("failed to commit execution attempt: "+err.Error()))
+			} else if m.tasks[i].PRNumber != 0 {
+				// Keep an already-open PR's remote branch in sync with every
+				// new commit — the very first push (creating the PR) is the
+				// agent's own job, done as part of its prompt (see
+				// buildOpenPRPrompt), but every push after that is cormake's
+				// to guarantee rather than trust the agent to remember.
+				if out, pushErr := runGit(m.tasks[i].WorktreePath, "push"); pushErr != nil {
+					m.appendLogLine(m.tasks[i].ID, logformat.LogCormakeLine("failed to push update to PR branch: "+pushErr.Error()+": "+out))
+				}
 			}
+		}
+		if wasOpeningPR && msg.Err == nil && sawResult {
+			cmd = queryPRStatusCmd(m.tasks[i].ID, m.tasks[i].WorktreePath, m.tasks[i].TargetBranch, true)
 		}
 		m.persistTask(m.tasks[i])
 		break
 	}
 	m.refreshTaskList()
 	m.syncDetail()
+	return cmd
 }
 
 // reconnectPlanPrompt/reconnectExecutePrompt are sent instead of the
@@ -1750,6 +1877,12 @@ const reconnectPlanPrompt = "cormake was restarted and is reconnecting to this i
 var reconnectExecutePrompt = "cormake was restarted and is reconnecting to this in-progress session. " +
 	"If the task is already complete, just summarize what was implemented; otherwise continue and finish it." +
 	executeSummaryInstruction
+
+// reconnectOpenPRPrompt is sent instead of buildOpenPRPrompt when
+// reconnectTask finds a task left mid-PR-creation by a previous cormake
+// process whose recorded process genuinely didn't survive.
+const reconnectOpenPRPrompt = "cormake was restarted while opening a pull request for this task. " +
+	"Check with `gh pr view` whether it was already created; if so just confirm its URL, otherwise push the branch and create it now."
 
 // reconnectTask handles a task Init found still PLANNING or IN_PROGRESS at
 // startup. Quitting cormake no longer kills a task's process (see the
@@ -1819,8 +1952,7 @@ func (m *Model) reconnectTask(taskID string) tea.Cmd {
 	}
 	if m.resultSeen[t.ID] {
 		m.appendLogLine(t.ID, logformat.LogCormakeLine("cormake restarted — the run had already finished"))
-		m.handleTaskFinished(taskFinishedMsg{TaskID: t.ID})
-		return nil
+		return m.handleTaskFinished(taskFinishedMsg{TaskID: t.ID})
 	}
 
 	m.appendLogLine(t.ID, logformat.LogCormakeLine("cormake restarted — reconnecting to interrupted session"))
@@ -1833,7 +1965,13 @@ func (m *Model) reconnectTask(taskID string) tea.Cmd {
 			m.appendLogLine(t.ID, logformat.LogCormakeLine("cannot reconnect — task has no worktree on record"))
 			return nil
 		}
-		return m.runExecuteAgent(t, reconnectExecutePrompt, t.SessionID)
+		return m.runExecuteAgent(t, reconnectExecutePrompt, t.SessionID, domain.StatusInProgress)
+	case domain.StatusOpeningPR:
+		if t.WorktreePath == "" {
+			m.appendLogLine(t.ID, logformat.LogCormakeLine("cannot reconnect — task has no worktree on record"))
+			return nil
+		}
+		return m.runExecuteAgent(t, reconnectOpenPRPrompt, t.SessionID, domain.StatusOpeningPR)
 	}
 	return nil
 }

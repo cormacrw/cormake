@@ -121,9 +121,9 @@ func (m Model) computeDashboardCounts() dashboardCounts {
 	for _, t := range m.tasks {
 		c.TotalCostUSD += t.Cost
 		switch t.Status {
-		case domain.StatusTodo, domain.StatusPlanning, domain.StatusPlanned, domain.StatusInProgress, domain.StatusAwaitingApproval:
+		case domain.StatusTodo, domain.StatusPlanning, domain.StatusPlanned, domain.StatusInProgress, domain.StatusAwaitingApproval, domain.StatusOpeningPR:
 			c.OpenTasks++
-		case domain.StatusReadyForReview:
+		case domain.StatusReadyForReview, domain.StatusInReview:
 			c.ReadyForReview++
 		case domain.StatusComplete:
 			if sameDay(t.UpdatedAt, now) {

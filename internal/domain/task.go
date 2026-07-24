@@ -9,13 +9,23 @@ const DefaultSourceBranch = "develop"
 
 // Status is a task's position in its lifecycle pipeline:
 //
-//	TODO -> (optionally) PLANNING -> PLANNED -> IN_PROGRESS -> AWAITING_APPROVAL* -> READY_FOR_REVIEW -> COMPLETE
+//	TODO -> (optionally) PLANNING -> PLANNED -> IN_PROGRESS -> AWAITING_APPROVAL* -> READY_FOR_REVIEW -> [OPENING_PR -> IN_REVIEW ->] COMPLETE
 //
 // Planning is optional: from TODO you can kick off a planning agent
 // (-> PLANNING -> PLANNED, once it's done) or skip straight to execution
 // (-> IN_PROGRESS). Execute is available from either TODO or PLANNED.
 // *Either PLANNING or IN_PROGRESS can pause on AWAITING_APPROVAL when the
 // agent needs a permission decision or has a clarifying question.
+//
+// The PR sub-branch is optional and manual: from READY_FOR_REVIEW, opening
+// a PR moves through OPENING_PR (an agent pushing the branch and running
+// `gh pr create`, see ui.startOpenPR) to IN_REVIEW once that's confirmed to
+// have actually landed (see ui.handlePRQuery). IN_REVIEW behaves like
+// READY_FOR_REVIEW — Review/Input both still work, resuming the same
+// execute session to address PR feedback (see ui.sendInputPrompt) — plus
+// its own PR-comments/PR-description panes and periodic polling (see
+// ui.ensurePRPollTicking). A task can also skip the PR flow entirely and go
+// straight from READY_FOR_REVIEW to COMPLETE, same as before this existed.
 //
 // ARCHIVED is a separate, manual side-branch: only a TODO or
 // READY_FOR_REVIEW task can be archived (parking work that isn't actively
@@ -33,6 +43,8 @@ const (
 	StatusInProgress       Status = "in_progress"
 	StatusAwaitingApproval Status = "awaiting_approval"
 	StatusReadyForReview   Status = "ready_for_review"
+	StatusOpeningPR        Status = "opening_pr"
+	StatusInReview         Status = "in_review"
 	StatusComplete         Status = "complete"
 	StatusFailed           Status = "failed"
 	StatusCancelled        Status = "cancelled"
@@ -153,6 +165,17 @@ type Task struct {
 
 	ErrorMessage string
 
+	// PRNumber/PRURL identify the pull request opened for this task's work
+	// (see ui.startOpenPR/ui.handlePRQuery) — the only PR-related state
+	// that's actually persisted; everything else about it (title, body,
+	// comments, merge state) is fetched live via `gh pr view` and kept
+	// in-memory only (see domain.PRSnapshot), since it's cheap to re-fetch
+	// and would otherwise just go stale on disk between polls. PRNumber
+	// zero means no PR has been opened (or the attempt failed) — used by
+	// detail.Model.HasPR to gate the PR-description/PR-comments tabs.
+	PRNumber int
+	PRURL    string
+
 	// Reserved for a future MCP-based import from tools like ClickUp/Jira.
 	// Defaults to "manual" and stays unpopulated until that importer exists.
 	Source      string
@@ -180,6 +203,8 @@ const (
 	StageInProgress     Stage = "IN PROGRESS"
 	StageAwaitingInput  Stage = "AWAITING INPUT"
 	StageReadyForReview Stage = "READY FOR REVIEW"
+	StageOpeningPR      Stage = "OPENING PR"
+	StageInReview       Stage = "IN REVIEW"
 	StageComplete       Stage = "COMPLETE"
 	StageFailed         Stage = "FAILED"
 	StageCancelled      Stage = "CANCELLED"
@@ -201,6 +226,10 @@ func (t Task) DisplayStage() (stage Stage, glyph string) {
 		return StageAwaitingInput, "⚠"
 	case StatusReadyForReview:
 		return StageReadyForReview, "👀"
+	case StatusOpeningPR:
+		return StageOpeningPR, "📤"
+	case StatusInReview:
+		return StageInReview, "🔍"
 	case StatusComplete:
 		return StageComplete, "✔"
 	case StatusFailed:

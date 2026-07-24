@@ -1,8 +1,8 @@
 // Package detail renders the right-hand side of the app: a fixed header
 // (title, metadata, tab bar) over a single scrollable content area that
-// shows whichever tab is active — Description, Plan (only when the task
-// has one), or Log. Editing happens in an external editor (see
-// internal/ui/editor.go), not in this pane.
+// shows whichever tab is active — Description, Plan/Summary/PR tabs (only
+// when applicable to the task), or Log. Editing happens in an external
+// editor (see internal/ui/editor.go), not in this pane.
 package detail
 
 import (
@@ -38,6 +38,8 @@ const (
 	TabDescription Tab = iota
 	TabPlan
 	TabSummary
+	TabPRDescription
+	TabPRComments
 	TabLog
 )
 
@@ -60,6 +62,13 @@ type Model struct {
 	renderedDescription string
 	renderedPlan        string
 	renderedSummary     string
+	renderedPRDesc      string
+	renderedPRComments  string
+
+	// prSnapshots holds the last-polled PR data per task ID (see
+	// ui.handlePRQuery), independent of which task is currently displayed —
+	// same "keep everything, render whichever is active" pattern as logs.
+	prSnapshots map[string]domain.PRSnapshot
 
 	activeTab Tab
 
@@ -71,8 +80,9 @@ type Model struct {
 
 func New(logs map[string][]string) Model {
 	return Model{
-		Viewport: viewport.New(0, 0),
-		logs:     logs,
+		Viewport:    viewport.New(0, 0),
+		logs:        logs,
+		prSnapshots: make(map[string]domain.PRSnapshot),
 	}
 }
 
@@ -141,6 +151,35 @@ func (m Model) HasSummary() bool {
 	return strings.TrimSpace(m.task.ResultSummary) != ""
 }
 
+// HasPR reports whether the task has an associated PR to show — gated on
+// Task.PRNumber (persisted) rather than on a snapshot actually being cached
+// yet, so the tabs appear immediately once a PR is opened even before the
+// first poll comes back (see refreshRendered's "loading" placeholder for
+// that gap).
+func (m Model) HasPR() bool {
+	return m.task.PRNumber != 0
+}
+
+// SetPRSnapshot records the latest polled PR data for taskID (see
+// ui.handlePRQuery) and, if that task is the one currently displayed,
+// re-renders and refreshes the viewport immediately.
+func (m *Model) SetPRSnapshot(taskID string, snap domain.PRSnapshot) {
+	m.prSnapshots[taskID] = snap
+	if m.task.ID != taskID {
+		return
+	}
+	m.refreshRendered()
+	m.syncViewportContent()
+}
+
+// PRSnapshot returns the last-polled PR data for taskID, if any — used by
+// the app shell to judge whether a task's PR looks merged yet (see
+// ui.openCompleteModal).
+func (m Model) PRSnapshot(taskID string) (domain.PRSnapshot, bool) {
+	snap, ok := m.prSnapshots[taskID]
+	return snap, ok
+}
+
 // ShowDescription, ShowPlan, ShowSummary, and ShowLog switch the active tab.
 // ShowPlan/ShowSummary are no-ops when the task has no plan/summary yet —
 // same "ignore, don't pretend" pattern as the Plan/Execute keys.
@@ -170,6 +209,22 @@ func (m *Model) ShowLog() {
 	m.syncViewportContent()
 }
 
+func (m *Model) ShowPRDescription() {
+	if !m.HasPR() {
+		return
+	}
+	m.activeTab = TabPRDescription
+	m.syncViewportContent()
+}
+
+func (m *Model) ShowPRComments() {
+	if !m.HasPR() {
+		return
+	}
+	m.activeTab = TabPRComments
+	m.syncViewportContent()
+}
+
 // syncViewportContent loads whichever tab is active into the shared
 // viewport. The Log tab opens scrolled to the bottom (tail -f style, so the
 // most recent Claude output is visible immediately); other tabs scroll back
@@ -180,6 +235,10 @@ func (m *Model) syncViewportContent() {
 		m.Viewport.SetContent(m.renderedPlan)
 	case TabSummary:
 		m.Viewport.SetContent(m.renderedSummary)
+	case TabPRDescription:
+		m.Viewport.SetContent(m.renderedPRDesc)
+	case TabPRComments:
+		m.Viewport.SetContent(m.renderedPRComments)
 	case TabLog:
 		m.Viewport.SetContent(m.renderLog(m.task.ID))
 	default:
@@ -279,6 +338,9 @@ func (m Model) visibleTabs() []Tab {
 	if m.HasSummary() {
 		tabs = append(tabs, TabSummary)
 	}
+	if m.HasPR() {
+		tabs = append(tabs, TabPRDescription, TabPRComments)
+	}
 	return append(tabs, TabLog)
 }
 
@@ -288,6 +350,10 @@ func tabLabel(t Tab) string {
 		return "Plan"
 	case TabSummary:
 		return "Summary"
+	case TabPRDescription:
+		return "PR"
+	case TabPRComments:
+		return "PR Comments"
 	case TabLog:
 		return "Log"
 	default:
@@ -343,6 +409,49 @@ func (m *Model) refreshRendered() {
 	} else {
 		m.renderedSummary = ""
 	}
+	m.refreshRenderedPR()
+}
+
+// refreshRenderedPR renders the PR-description and PR-comments tabs from
+// whatever snapshot is currently on hand for the active task — a "loading"
+// placeholder if the task has a PR (Task.PRNumber set) but no poll has come
+// back for it yet, e.g. immediately after opening one.
+func (m *Model) refreshRenderedPR() {
+	if !m.HasPR() {
+		m.renderedPRDesc = ""
+		m.renderedPRComments = ""
+		return
+	}
+	snap, ok := m.prSnapshots[m.task.ID]
+	if !ok {
+		loading := metaStyle.Render("Loading PR info…")
+		m.renderedPRDesc = loading
+		m.renderedPRComments = loading
+		return
+	}
+
+	divider := dividerStyle.Render(strings.Repeat("─", max0(m.width)))
+	header := metaStyle.Render(fmt.Sprintf("PR #%d · %s · %s", snap.Number, snap.State, snap.URL))
+	m.renderedPRDesc = strings.Join([]string{header, divider, ""}, "\n") +
+		renderMarkdown(snap.Title+"\n\n"+snap.Body, m.width, "_no description_")
+	m.renderedPRComments = renderPRComments(snap.Comments, m.width)
+}
+
+// renderPRComments joins a PR's comments/reviews (see domain.PRComment),
+// already time-ordered by queryPR, into one scrollable feed — each entry
+// its own little markdown block so authors/timestamps render distinctly
+// from the surrounding prose.
+func renderPRComments(comments []domain.PRComment, width int) string {
+	if len(comments) == 0 {
+		return metaStyle.Render("_no comments yet_")
+	}
+	divider := dividerStyle.Render(strings.Repeat("─", max0(width)))
+	blocks := make([]string, len(comments))
+	for i, c := range comments {
+		head := titleStyle.Render(c.Author) + metaStyle.Render(fmt.Sprintf(" · %s · %s", c.Kind, relativeTime(c.CreatedAt)))
+		blocks[i] = head + "\n\n" + renderMarkdown(c.Body, width, "_empty_")
+	}
+	return strings.Join(blocks, "\n"+divider+"\n")
 }
 
 // formatUsageLine renders the task's total cost and token usage — accrued

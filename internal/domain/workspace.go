@@ -50,6 +50,15 @@ type Workspace struct {
 	// EffectiveDefaultTargetBranch.
 	DefaultTargetBranch string
 
+	// PRSkill, when set, names a Claude Code skill that opening a PR (see
+	// ui.buildOpenPRPrompt) should be told to use for writing the PR
+	// description, taking precedence over the repo's own pull request
+	// template — useful when a repo's skills already encode richer
+	// PR-writing conventions than a static template can. Hand-edited via
+	// workspaces.json, same as TaskTemplate/Prefix — empty means unset,
+	// falling back to the repo's template.
+	PRSkill string
+
 	// DefaultAgentBackend is which agent CLI (see AgentBackend) Plan/Execute
 	// runs in this workspace use by default, overridable per-run from the
 	// confirmation modal. Hand-edited via workspaces.json, same as

@@ -30,10 +30,21 @@ type KeyMap struct {
 	// eligibility check — delete works no matter what stage the task is in).
 	Delete key.Binding
 
-	// Complete finalizes a READY_FOR_REVIEW task that's been executed: behind
-	// a confirmation, commits the worktree's outstanding changes onto its
-	// target branch, removes the worktree, and moves the task to COMPLETE.
+	// Complete finalizes a READY_FOR_REVIEW or IN_REVIEW task that's been
+	// executed: behind a confirmation, commits the worktree's outstanding
+	// changes onto its target branch, removes the worktree, and moves the
+	// task to COMPLETE.
 	Complete key.Binding
+
+	// OpenPR stages opening a pull request for a READY_FOR_REVIEW task
+	// behind a confirmation modal — a claude run that pushes the branch and
+	// creates the PR with gh (see startOpenPR), moving the task through
+	// OPENING_PR to IN_REVIEW once that's confirmed to have landed.
+	OpenPR key.Binding
+
+	// OpenPRBrowser opens the selected task's PR (if it has one) in the
+	// system's default browser.
+	OpenPRBrowser key.Binding
 
 	Open       key.Binding // enters edit mode for the selected task's title/body
 	Workspaces key.Binding // opens the workspace-picker modal
@@ -61,20 +72,23 @@ type KeyMap struct {
 	// exits, resuming whichever session (plan or execute) produced them.
 	Review key.Binding
 
-	// Input opens a free-form textarea prompt for a PLANNED or
-	// READY_FOR_REVIEW task, sent to claude as a follow-up message that
-	// resumes whichever session (plan or execute) produced that state —
-	// a lighter-weight alternative to Review for when there's nothing to
-	// annotate on the artifact itself, just something to say.
+	// Input opens a free-form textarea prompt for a PLANNED, READY_FOR_REVIEW,
+	// or IN_REVIEW task, sent to claude as a follow-up message that resumes
+	// whichever session (plan or execute) produced that state — a
+	// lighter-weight alternative to Review for when there's nothing to
+	// annotate on the artifact itself, just something to say (e.g. pasting
+	// in a GitHub PR review comment to address).
 	Input key.Binding
 
-	// Switch which tab the detail pane's content area shows. 1/2/3/4 are
-	// fixed slots (Description/Plan/Summary/Log) regardless of whether
-	// Plan/Summary is applicable to the current task, so they don't shift
-	// task to task; [ and ] cycle through whichever tabs are visible.
+	// Switch which tab the detail pane's content area shows. 1-6 are fixed
+	// slots (Description/Plan/Summary/PR/PR Comments/Log) regardless of
+	// whether a given tab is applicable to the current task, so they don't
+	// shift task to task; [ and ] cycle through whichever tabs are visible.
 	TabDescription key.Binding
 	TabPlan        key.Binding
 	TabSummary     key.Binding
+	TabPRDesc      key.Binding
+	TabPRComments  key.Binding
 	TabLog         key.Binding
 	TabPrev        key.Binding
 	TabNext        key.Binding
@@ -100,6 +114,9 @@ var keys = KeyMap{
 	Delete:   key.NewBinding(key.WithKeys("d")),
 	Complete: key.NewBinding(key.WithKeys("m")),
 
+	OpenPR:        key.NewBinding(key.WithKeys("P")),
+	OpenPRBrowser: key.NewBinding(key.WithKeys("b")),
+
 	Open:       key.NewBinding(key.WithKeys("enter")),
 	Workspaces: key.NewBinding(key.WithKeys("w")),
 
@@ -115,6 +132,8 @@ var keys = KeyMap{
 	TabPlan:        key.NewBinding(key.WithKeys("2")),
 	TabSummary:     key.NewBinding(key.WithKeys("3")),
 	TabLog:         key.NewBinding(key.WithKeys("4")),
+	TabPRDesc:      key.NewBinding(key.WithKeys("5")),
+	TabPRComments:  key.NewBinding(key.WithKeys("6")),
 	TabPrev:        key.NewBinding(key.WithKeys("[")),
 	TabNext:        key.NewBinding(key.WithKeys("]")),
 
@@ -123,4 +142,4 @@ var keys = KeyMap{
 	Help:    key.NewBinding(key.WithKeys("?")),
 }
 
-const footerHelp = " [n]ew [/]filter [enter]edit [p]lan [e]xecute [r]eview [i]nput [m]ark complete [t]arget-branch [s]ource-branch [a]rchive [d]elete [w]orkspaces tabs:1-4/[/] arrows:scroll [?]help [q]uit"
+const footerHelp = " [n]ew [/]filter [enter]edit [p]lan [e]xecute [r]eview [i]nput [P]R [b]rowser [m]ark complete [t]arget-branch [s]ource-branch [a]rchive [d]elete [w]orkspaces tabs:1-6/[/] arrows:scroll [?]help [q]uit"
