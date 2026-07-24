@@ -1,5 +1,7 @@
 # cormake
 
+Hello world!
+
 A terminal "command center" for delegating coding work to [Claude](https://claude.com) or [Cursor](https://cursor.com). Create a task, point it at a git repo, and choose **plan** mode (the agent researches the codebase and proposes an approach without touching code) or **execute** mode (the agent works autonomously inside an isolated git worktree).
 
 See [VISION.md](VISION.md) for the full design rationale and architecture.
