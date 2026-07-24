@@ -4,17 +4,49 @@ import (
 	"strings"
 )
 
-// listLocalBranches returns repoPath's local branches, most-recently-committed
-// first — a reasonable default order for a branch picker, since the user's
-// own recent work is likely near the top. Best-effort: an empty/unreadable
-// repo (e.g. no commits yet) just yields no branches rather than an error,
-// leaving a branch picker's "create new" option as the only choice.
+// listLocalBranches returns repoPath's local and remote-tracking branches,
+// most-recently-committed first — a reasonable default order for a branch
+// picker, since the user's own recent work is likely near the top. Remote
+// branches (e.g. "origin/main") are reduced to their plain name so a branch
+// that's only ever been fetched, never checked out locally, still shows up
+// as a pickable option — common for a source/merge-target branch in a fresh
+// clone or worktree. A branch present both locally and on a remote is only
+// listed once. Best-effort: an empty/unreadable repo (e.g. no commits yet)
+// just yields no branches rather than an error, leaving a branch picker's
+// "create new" option as the only choice.
 func listLocalBranches(repoPath string) []string {
-	out, err := runGit(repoPath, "branch", "--format=%(refname:short)", "--sort=-committerdate")
+	out, err := runGit(repoPath, "branch", "--all", "--format=%(refname)", "--sort=-committerdate")
 	if err != nil || strings.TrimSpace(out) == "" {
 		return nil
 	}
-	return strings.Split(out, "\n")
+
+	seen := make(map[string]bool)
+	var branches []string
+	for _, ref := range strings.Split(out, "\n") {
+		var name string
+		switch {
+		case strings.HasPrefix(ref, "refs/heads/"):
+			name = strings.TrimPrefix(ref, "refs/heads/")
+		case strings.HasPrefix(ref, "refs/remotes/"):
+			rest := strings.TrimPrefix(ref, "refs/remotes/")
+			idx := strings.Index(rest, "/")
+			if idx == -1 {
+				continue
+			}
+			name = rest[idx+1:]
+			if name == "HEAD" {
+				continue // origin/HEAD is a symbolic pointer, not a branch
+			}
+		default:
+			continue
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		branches = append(branches, name)
+	}
+	return branches
 }
 
 // branchExists reports whether branch is a known local branch in repoPath.
