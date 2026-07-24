@@ -8,9 +8,15 @@ import (
 
 	"cormake/internal/store"
 	"cormake/internal/ui"
+	"cormake/internal/version"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println("cormake v" + version.Version)
+		return
+	}
+
 	dir, err := store.AppDir()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cormake: could not resolve app directory:", err)
